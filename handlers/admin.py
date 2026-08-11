@@ -1,8 +1,8 @@
 """
 VIP Access Bot — Admin Panel Handler
 Full admin panel with ConversationHandler for multi-step flows.
-13 admin features accessible only to bot owners.
-Owner list is NEVER displayed — neither owner knows about the other.
+Admin features accessible only to bot owners (dynamic per-bot).
+Forward Protection & Auto Disappear are global toggles (main bot OWNER only).
 """
 import html
 import json
@@ -17,8 +17,8 @@ from telegram.ext import (
     filters,
 )
 
-from database import db
-from config import OWNER_IDS
+from utils.bot_helpers import get_db, get_owner_ids, is_main_bot, get_main_db
+from config import OWNER_ID
 from utils.helpers import format_price, escape_md
 from handlers.broadcast import broadcast_message
 
@@ -43,21 +43,17 @@ logger = logging.getLogger(__name__)
 
 async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /admin command — show admin panel (owners only)."""
-    if update.effective_user.id not in OWNER_IDS:
+    if update.effective_user.id not in get_owner_ids(context):
         return ConversationHandler.END
     return await _show_admin_menu(update, context)
 
 
 async def _show_admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Display the admin menu with all option buttons."""
+    db = get_db(context)
+
     proof_enabled = await db.get_setting("proof_button_enabled")
     proof_status = "ON ✅" if proof_enabled == "1" else "OFF ❌"
-
-    fwd_enabled = await db.get_setting("forward_protection")
-    fwd_status = "ON ✅" if fwd_enabled == "1" else "OFF ❌"
-
-    disappear_enabled = await db.get_setting("auto_disappear")
-    disappear_status = "ON ✅" if disappear_enabled == "1" else "OFF ❌"
 
     keyboard = [
         [InlineKeyboardButton("🎁 Edit Product", callback_data="adm_edit")],
@@ -67,14 +63,27 @@ async def _show_admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🔘 Toggle Proof Button ({proof_status})",
             callback_data="adm_toggle_proof",
         )],
-        [InlineKeyboardButton(
+    ]
+
+    # Forward Protection & Auto Disappear — GLOBAL toggles, only on main bot admin
+    if is_main_bot(context):
+        main_db = get_main_db(context)
+        fwd_enabled = await main_db.get_setting("forward_protection")
+        fwd_status = "ON ✅" if fwd_enabled == "1" else "OFF ❌"
+
+        disappear_enabled = await main_db.get_setting("auto_disappear")
+        disappear_status = "ON ✅" if disappear_enabled == "1" else "OFF ❌"
+
+        keyboard.append([InlineKeyboardButton(
             f"🔒 Forward Protection ({fwd_status})",
             callback_data="adm_toggle_fwd",
-        )],
-        [InlineKeyboardButton(
+        )])
+        keyboard.append([InlineKeyboardButton(
             f"⏱ Auto Disappear 30min ({disappear_status})",
             callback_data="adm_toggle_disappear",
-        )],
+        )])
+
+    keyboard.extend([
         [InlineKeyboardButton("📄 Set Proof Link", callback_data="adm_proof_link")],
         [InlineKeyboardButton("🖼 Set Proof Photo", callback_data="adm_proof_photo")],
         [InlineKeyboardButton("🎨 Set Static Button Colors", callback_data="adm_colors")],
@@ -85,7 +94,11 @@ async def _show_admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("❓ Set How to Use", callback_data="adm_htu")],
         [InlineKeyboardButton("👥 View Users", callback_data="adm_users")],
         [InlineKeyboardButton("📊 Stats", callback_data="adm_stats")],
-    ]
+    ])
+
+    # Bot Hosting menu — only for main bot's OWNER_ID
+    if is_main_bot(context) and update.effective_user.id == OWNER_ID:
+        keyboard.append([InlineKeyboardButton("🤖 Bot Hosting", callback_data="adm_hosting")])
 
     text = "🔧 *Admin Panel*\n\nSelect an option below:"
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -112,6 +125,7 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     query = update.callback_query
     await query.answer()
     data = query.data
+    db = get_db(context)
 
     if data == "adm_edit":
         return await _show_edit_products(update, context)
@@ -202,6 +216,10 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return await _show_stats(update, context)
     elif data == "adm_pending":
         return await _show_pending_orders(update, context, page=0)
+    elif data == "adm_hosting":
+        # Route to hosting menu (imported from handlers.hosting)
+        from handlers.hosting import hosting_menu
+        return await hosting_menu(update, context)
     elif data == "adm_back":
         return await _show_admin_menu(update, context)
 
@@ -314,6 +332,7 @@ async def _ap_trial(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def _ap_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Step 5/5: Get channel invite link and create the product."""
+    db = get_db(context)
     channel_link = update.message.text.strip()
     data = context.user_data.get("add_product", {})
     trial_ids = json.dumps(data.get("trial_ids", []))
@@ -347,6 +366,7 @@ async def _ap_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def _show_edit_products(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show product list for editing."""
+    db = get_db(context)
     query = update.callback_query
     products = await db.get_all_products(active_only=False)
 
@@ -380,6 +400,7 @@ async def _show_edit_products(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 async def _ep_select(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle product selection for editing."""
+    db = get_db(context)
     query = update.callback_query
     await query.answer()
 
@@ -426,6 +447,7 @@ async def _ep_select(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def _ep_field(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle field selection for editing."""
+    db = get_db(context)
     query = update.callback_query
     await query.answer()
 
@@ -474,6 +496,7 @@ async def _ep_field(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def _ep_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle new value entry for product editing."""
+    db = get_db(context)
     product_id = context.user_data.get("edit_product_id")
     field = context.user_data.get("edit_field")
 
@@ -550,6 +573,7 @@ async def _ep_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def _show_remove_products(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show product list for removal."""
+    db = get_db(context)
     query = update.callback_query
     products = await db.get_all_products(active_only=False)
 
@@ -582,6 +606,7 @@ async def _show_remove_products(update: Update, context: ContextTypes.DEFAULT_TY
 
 async def _rp_select(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle product selection for removal — ask confirmation."""
+    db = get_db(context)
     query = update.callback_query
     await query.answer()
 
@@ -617,6 +642,7 @@ async def _rp_select(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def _rp_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle removal confirmation (Yes/No)."""
+    db = get_db(context)
     query = update.callback_query
     await query.answer()
 
@@ -638,6 +664,7 @@ async def _rp_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def _toggle_proof(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Toggle the proof button ON/OFF in the /start menu."""
+    db = get_db(context)
     current = await db.get_setting("proof_button_enabled")
     new_value = "0" if current == "1" else "1"
     await db.set_setting("proof_button_enabled", new_value)
@@ -650,35 +677,37 @@ async def _toggle_proof(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ═══════════════════════════════════════════════
-#  TOGGLE FORWARD PROTECTION
+#  TOGGLE FORWARD PROTECTION (GLOBAL — Main Bot Only)
 # ═══════════════════════════════════════════════
 
 async def _toggle_forward_protection(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Toggle forward protection ON/OFF for trial & welcome media."""
-    current = await db.get_setting("forward_protection")
+    """Toggle forward protection ON/OFF for trial & welcome media. GLOBAL setting."""
+    main_db = get_main_db(context)
+    current = await main_db.get_setting("forward_protection")
     new_value = "0" if current == "1" else "1"
-    await db.set_setting("forward_protection", new_value)
+    await main_db.set_setting("forward_protection", new_value)
 
     status = "ON ✅" if new_value == "1" else "OFF ❌"
     await update.callback_query.answer(
-        f"Forward Protection is now {status}", show_alert=True
+        f"Forward Protection is now {status} (ALL BOTS)", show_alert=True
     )
     return await _show_admin_menu(update, context)
 
 
 # ═══════════════════════════════════════════════
-#  TOGGLE AUTO DISAPPEAR
+#  TOGGLE AUTO DISAPPEAR (GLOBAL — Main Bot Only)
 # ═══════════════════════════════════════════════
 
 async def _toggle_auto_disappear(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Toggle auto disappear ON/OFF — trial media deletes after 30 minutes."""
-    current = await db.get_setting("auto_disappear")
+    """Toggle auto disappear ON/OFF — trial media deletes after 30 minutes. GLOBAL setting."""
+    main_db = get_main_db(context)
+    current = await main_db.get_setting("auto_disappear")
     new_value = "0" if current == "1" else "1"
-    await db.set_setting("auto_disappear", new_value)
+    await main_db.set_setting("auto_disappear", new_value)
 
     status = "ON ✅" if new_value == "1" else "OFF ❌"
     await update.callback_query.answer(
-        f"Auto Disappear (30 min) is now {status}", show_alert=True
+        f"Auto Disappear (30 min) is now {status} (ALL BOTS)", show_alert=True
     )
     return await _show_admin_menu(update, context)
 
@@ -689,6 +718,7 @@ async def _toggle_auto_disappear(update: Update, context: ContextTypes.DEFAULT_T
 
 async def _set_proof_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Save the proof link URL."""
+    db = get_db(context)
     link = update.message.text.strip()
     await db.set_setting("proof_link", link)
     await update.message.reply_text(f"✅ Proof link updated to:\n{link}")
@@ -701,6 +731,7 @@ async def _set_proof_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def _set_proof_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Save the proof photo file_id."""
+    db = get_db(context)
     if update.message.photo:
         file_id = update.message.photo[-1].file_id
         await db.set_setting("proof_photo_id", file_id)
@@ -743,6 +774,7 @@ async def _show_colors_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def _bc_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Receive the broadcast message content."""
+    db = get_db(context)
     context.user_data["broadcast_message"] = update.message
     user_count = await db.get_user_count()
 
@@ -799,6 +831,7 @@ async def _bc_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def _set_upi(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Save the UPI ID."""
+    db = get_db(context)
     upi = update.message.text.strip()
     if not upi or "@" not in upi:
         await update.message.reply_text(
@@ -819,6 +852,7 @@ async def _set_upi(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def _set_qr_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Save custom QR image or remove it to use auto-generated."""
+    db = get_db(context)
     if update.message.text and update.message.text.strip().lower() == "remove":
         await db.set_setting("qr_image_id", "")
         await update.message.reply_text(
@@ -850,6 +884,7 @@ async def _set_qr_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def _set_welcome(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Collect welcome media one by one until 'done' is typed."""
+    db = get_db(context)
     if update.message.text:
         text = update.message.text.strip().lower()
         if text == "clear":
@@ -902,6 +937,7 @@ async def _set_htu_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return SET_HTU_TEXT
 
 async def _set_htu_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    db = get_db(context)
     text = update.message.text.strip()
     if not text:
         await update.message.reply_text("❌ Text cannot be empty.")
@@ -921,11 +957,13 @@ async def _show_users_list(
     update: Update, context: ContextTypes.DEFAULT_TYPE, page: int = 0
 ):
     """Show paginated user list (10 per page)."""
+    db = get_db(context)
     query = update.callback_query
 
     users = await db.get_all_users()
-    # Hide owners from the user list so they remain invisible to each other
-    users = [u for u in users if u.get("user_id") not in OWNER_IDS]
+    # Hide owners from the user list so they remain invisible
+    owner_ids = get_owner_ids(context)
+    users = [u for u in users if u.get("user_id") not in owner_ids]
     
     total = len(users)
     per_page = 10
@@ -993,6 +1031,7 @@ async def _users_page_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def _show_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show aggregated bot statistics."""
+    db = get_db(context)
     query = update.callback_query
     stats = await db.get_stats()
 
@@ -1032,6 +1071,7 @@ async def _show_pending_orders(
     matching the real-time payment alert format.
     Each order is sent as a separate message with Approve/Reject buttons.
     """
+    db = get_db(context)
     query = update.callback_query
     chat_id = query.message.chat_id
     orders = await db.get_pending_orders()
@@ -1169,7 +1209,7 @@ async def _cancel_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]:
         context.user_data.pop(key, None)
 
-    if update.effective_user.id not in OWNER_IDS:
+    if update.effective_user.id not in get_owner_ids(context):
         return ConversationHandler.END
 
     return await _show_admin_menu(update, context)
@@ -1182,102 +1222,113 @@ async def _cancel_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def get_admin_conversation_handler() -> ConversationHandler:
     """
     Build and return the admin ConversationHandler.
-    Handles all 13 admin features with proper state routing.
+    Handles all admin features + hosting management with proper state routing.
     """
+    # Base states
+    states = {
+        # ── Main menu ──
+        ADMIN_MENU: [
+            CallbackQueryHandler(_users_page_cb, pattern=r"^adm_vu_p_\d+$"),
+            CallbackQueryHandler(_pending_page_cb, pattern=r"^adm_po_p_\d+$"),
+            CallbackQueryHandler(admin_menu_handler, pattern=r"^adm_"),
+        ],
+        # ── Add Product (5 steps) ──
+        AP_NAME: [
+            MessageHandler(filters.TEXT & ~filters.COMMAND, _ap_name)
+        ],
+        AP_PRICE: [
+            MessageHandler(filters.TEXT & ~filters.COMMAND, _ap_price)
+        ],
+        AP_DESC: [
+            MessageHandler(filters.TEXT & ~filters.COMMAND, _ap_desc)
+        ],
+        AP_TRIAL: [
+            MessageHandler(
+                (filters.VIDEO | filters.PHOTO | filters.ANIMATION | filters.Document.ALL
+                 | filters.TEXT) & ~filters.COMMAND,
+                _ap_trial,
+            )
+        ],
+        AP_CHANNEL: [
+            MessageHandler(filters.TEXT & ~filters.COMMAND, _ap_channel)
+        ],
+        # ── Edit Product ──
+        EP_SELECT: [
+            CallbackQueryHandler(_ep_select, pattern=r"^adm_")
+        ],
+        EP_FIELD: [
+            CallbackQueryHandler(_ep_field, pattern=r"^adm_")
+        ],
+        EP_VALUE: [
+            MessageHandler(
+                (filters.VIDEO | filters.PHOTO | filters.ANIMATION | filters.Document.ALL
+                 | filters.TEXT) & ~filters.COMMAND,
+                _ep_value,
+            )
+        ],
+        # ── Remove Product ──
+        RP_SELECT: [
+            CallbackQueryHandler(_rp_select, pattern=r"^adm_")
+        ],
+        RP_CONFIRM: [
+            CallbackQueryHandler(_rp_confirm, pattern=r"^adm_rc_")
+        ],
+        # ── Settings ──
+        SET_UPI_INPUT: [
+            MessageHandler(filters.TEXT & ~filters.COMMAND, _set_upi)
+        ],
+        SET_QR_INPUT: [
+            MessageHandler(
+                (filters.PHOTO | filters.Document.ALL | filters.TEXT)
+                & ~filters.COMMAND,
+                _set_qr_image,
+            )
+        ],
+        SET_WELCOME_INPUT: [
+            MessageHandler(
+                (filters.VIDEO | filters.ANIMATION | filters.PHOTO
+                 | filters.Document.ALL | filters.TEXT) & ~filters.COMMAND,
+                _set_welcome,
+            )
+        ],
+        SET_HTU_VIDEO: [
+            MessageHandler(
+                (filters.VIDEO | filters.ANIMATION | filters.Document.ALL) & ~filters.COMMAND,
+                _set_htu_video,
+            )
+        ],
+        SET_HTU_TEXT: [
+            MessageHandler(filters.TEXT & ~filters.COMMAND, _set_htu_text)
+        ],
+        SET_PROOF_LINK_INPUT: [
+            MessageHandler(filters.TEXT & ~filters.COMMAND, _set_proof_link)
+        ],
+        SET_PROOF_PHOTO_INPUT: [
+            MessageHandler(
+                (filters.PHOTO | filters.Document.ALL) & ~filters.COMMAND,
+                _set_proof_photo,
+            )
+        ],
+        # ── Broadcast ──
+        BC_MESSAGE: [
+            MessageHandler(filters.ALL & ~filters.COMMAND, _bc_message)
+        ],
+        BC_CONFIRM: [
+            CallbackQueryHandler(_bc_confirm, pattern=r"^adm_bc_")
+        ],
+    }
+
+    # Merge hosting states (states 20-25)
+    try:
+        from handlers.hosting import get_hosting_states
+        hosting_states = get_hosting_states()
+        states.update(hosting_states)
+    except ImportError:
+        logger.warning("Hosting module not found — hosting features disabled")
+
     return ConversationHandler(
         entry_points=[CommandHandler("admin", admin_command)],
-        states={
-            # ── Main menu ──
-            ADMIN_MENU: [
-                CallbackQueryHandler(_users_page_cb, pattern=r"^adm_vu_p_\d+$"),
-                CallbackQueryHandler(_pending_page_cb, pattern=r"^adm_po_p_\d+$"),
-                CallbackQueryHandler(admin_menu_handler, pattern=r"^adm_"),
-            ],
-            # ── Add Product (5 steps) ──
-            AP_NAME: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, _ap_name)
-            ],
-            AP_PRICE: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, _ap_price)
-            ],
-            AP_DESC: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, _ap_desc)
-            ],
-            AP_TRIAL: [
-                MessageHandler(
-                    (filters.VIDEO | filters.PHOTO | filters.ANIMATION | filters.Document.ALL
-                     | filters.TEXT) & ~filters.COMMAND,
-                    _ap_trial,
-                )
-            ],
-            AP_CHANNEL: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, _ap_channel)
-            ],
-            # ── Edit Product ──
-            EP_SELECT: [
-                CallbackQueryHandler(_ep_select, pattern=r"^adm_")
-            ],
-            EP_FIELD: [
-                CallbackQueryHandler(_ep_field, pattern=r"^adm_")
-            ],
-            EP_VALUE: [
-                MessageHandler(
-                    (filters.VIDEO | filters.PHOTO | filters.ANIMATION | filters.Document.ALL
-                     | filters.TEXT) & ~filters.COMMAND,
-                    _ep_value,
-                )
-            ],
-            # ── Remove Product ──
-            RP_SELECT: [
-                CallbackQueryHandler(_rp_select, pattern=r"^adm_")
-            ],
-            RP_CONFIRM: [
-                CallbackQueryHandler(_rp_confirm, pattern=r"^adm_rc_")
-            ],
-            # ── Settings ──
-            SET_UPI_INPUT: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, _set_upi)
-            ],
-            SET_QR_INPUT: [
-                MessageHandler(
-                    (filters.PHOTO | filters.Document.ALL | filters.TEXT)
-                    & ~filters.COMMAND,
-                    _set_qr_image,
-                )
-            ],
-            SET_WELCOME_INPUT: [
-                MessageHandler(
-                    (filters.VIDEO | filters.ANIMATION | filters.PHOTO
-                     | filters.Document.ALL | filters.TEXT) & ~filters.COMMAND,
-                    _set_welcome,
-                )
-            ],
-            SET_HTU_VIDEO: [
-                MessageHandler(
-                    (filters.VIDEO | filters.ANIMATION | filters.Document.ALL) & ~filters.COMMAND,
-                    _set_htu_video,
-                )
-            ],
-            SET_HTU_TEXT: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, _set_htu_text)
-            ],
-            SET_PROOF_LINK_INPUT: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, _set_proof_link)
-            ],
-            SET_PROOF_PHOTO_INPUT: [
-                MessageHandler(
-                    (filters.PHOTO | filters.Document.ALL) & ~filters.COMMAND,
-                    _set_proof_photo,
-                )
-            ],
-            # ── Broadcast ──
-            BC_MESSAGE: [
-                MessageHandler(filters.ALL & ~filters.COMMAND, _bc_message)
-            ],
-            BC_CONFIRM: [
-                CallbackQueryHandler(_bc_confirm, pattern=r"^adm_bc_")
-            ],
-        },
+        states=states,
         fallbacks=[
             CommandHandler("cancel", _cancel_admin),
             CommandHandler("admin", admin_command),

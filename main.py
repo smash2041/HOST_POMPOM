@@ -1,14 +1,13 @@
 """
 VIP Access Bot — Main Entry Point
 Starts Telegram bot (polling) + aiohttp web server concurrently.
-Uses httpx for self-ping keep-alive on Render free tier.
+Supports multi-bot hosting via BotManager.
+Optimized for AWS EC2 deployment.
 """
-import os
 import re
 import asyncio
 import logging
 
-import httpx
 from aiohttp import web
 from telegram.ext import (
     Application,
@@ -18,9 +17,10 @@ from telegram.ext import (
     filters,
 )
 
-from config import BOT_TOKEN, PORT, OWNER_IDS
+from config import BOT_TOKEN, PORT, OWNER_ID
 from database import db
 from web_server import create_web_app
+from utils.bot_helpers import get_owner_ids
 from handlers.start import (
     start_command,
     product_callback,
@@ -55,12 +55,15 @@ async def handle_message(update, context):
     """
     Global message handler (lowest priority).
     Routes payment proof, issue reporting, and owner replies.
+    Uses dynamic owner_ids from context.bot_data.
     """
     if not update.message:
         return
 
+    owner_ids = get_owner_ids(context)
+
     # Check for Owner Reply to an Issue
-    if update.effective_user.id in OWNER_IDS and update.message.reply_to_message:
+    if update.effective_user.id in owner_ids and update.message.reply_to_message:
         reply_msg = update.message.reply_to_message
         if reply_msg.text and "ID:" in reply_msg.text:
             try:
@@ -81,7 +84,7 @@ async def handle_message(update, context):
     # Check if user is reporting an issue
     if context.user_data.get("awaiting_issue"):
         # Forward issue to owners
-        for owner_id in OWNER_IDS:
+        for owner_id in owner_ids:
             try:
                 # Forward the exact message
                 await update.message.forward(chat_id=owner_id)
@@ -121,31 +124,11 @@ async def error_handler(update, context):
 
 
 # ═══════════════════════════════════════════════
-#  SELF-PING (Render Keep-Alive)
-# ═══════════════════════════════════════════════
-
-async def self_ping(url: str, interval: int = 300):
-    """
-    Self-ping loop to keep Render free-tier service alive.
-    Uses httpx async client. Pings every 5 minutes.
-    """
-    await asyncio.sleep(30)  # Wait for server startup
-    async with httpx.AsyncClient(timeout=15) as client:
-        while True:
-            try:
-                response = await client.get(f"{url}/ping")
-                logger.info(f"Self-ping OK: {response.status_code}")
-            except Exception as e:
-                logger.warning(f"Self-ping failed: {e}")
-            await asyncio.sleep(interval)
-
-
-# ═══════════════════════════════════════════════
 #  MAIN
 # ═══════════════════════════════════════════════
 
 async def main():
-    """Main entry point — starts bot polling + web server concurrently."""
+    """Main entry point — starts bot polling + web server + hosted bots."""
     logger.info("=" * 50)
     logger.info("Starting VIP Access Bot...")
     logger.info("=" * 50)
@@ -156,6 +139,12 @@ async def main():
 
     # ── 2. Build Telegram Bot Application ──
     app = Application.builder().token(BOT_TOKEN).build()
+
+    # Set bot_data for multi-bot system
+    app.bot_data["db"] = db
+    app.bot_data["owner_ids"] = {OWNER_ID} - {0}
+    app.bot_data["is_main_bot"] = True
+    app.bot_data["main_db"] = db
 
     # Admin conversation handler (highest priority — group 0)
     app.add_handler(get_admin_conversation_handler(), group=0)
@@ -223,22 +212,27 @@ async def main():
         drop_pending_updates=True,
         allowed_updates=["message", "callback_query"],
     )
-    logger.info("✅ Bot polling started")
+    logger.info("✅ Main bot polling started")
 
-    # ── 4. Start aiohttp Web Server ──
+    # ── 4. Initialize BotManager & Load Hosted Bots ──
+    from bot_manager import BotManager
+    bot_manager = BotManager(db, OWNER_ID)
+    app.bot_data["bot_manager"] = bot_manager
+
+    await bot_manager.load_all_bots()
+    logger.info("✅ Hosted bots loaded")
+
+    # Start expiry checker background task
+    expiry_task = asyncio.create_task(bot_manager.check_expiries())
+    logger.info("✅ Expiry checker started")
+
+    # ── 5. Start aiohttp Web Server ──
     web_app = create_web_app()
     runner = web.AppRunner(web_app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", PORT)
     await site.start()
     logger.info(f"✅ Web server started on 0.0.0.0:{PORT}")
-
-    # ── 5. Start Self-Ping (Render keep-alive via httpx) ──
-    render_url = os.getenv(
-        "RENDER_EXTERNAL_URL", f"http://localhost:{PORT}"
-    )
-    ping_task = asyncio.create_task(self_ping(render_url))
-    logger.info(f"✅ Self-ping task started → {render_url}/ping")
 
     logger.info("=" * 50)
     logger.info("🚀 VIP Access Bot is fully operational!")
@@ -253,11 +247,14 @@ async def main():
     finally:
         # ── Graceful Shutdown ──
         logger.info("Shutting down...")
-        ping_task.cancel()
+        expiry_task.cancel()
         try:
-            await ping_task
+            await expiry_task
         except asyncio.CancelledError:
             pass
+        # Shutdown all hosted bots
+        await bot_manager.shutdown_all()
+        # Shutdown main bot
         await app.updater.stop()
         await app.stop()
         await app.shutdown()

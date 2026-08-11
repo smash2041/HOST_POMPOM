@@ -8,8 +8,8 @@ import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 
-from database import db
-from config import OWNER_IDS, UPI_ID
+from utils.bot_helpers import get_db, get_owner_ids
+from config import UPI_ID
 from utils.qr_generator import generate_upi_qr
 from utils.helpers import format_price
 
@@ -21,6 +21,7 @@ async def buy_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     Handle Buy Now button.
     Shows UPI QR (auto-generated or custom) + payment instructions.
     """
+    db = get_db(context)
     query = update.callback_query
     await query.answer()
 
@@ -102,6 +103,7 @@ async def paid_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     Handle 'I Have Paid' button.
     Creates a pending order and asks user for payment proof.
     """
+    db = get_db(context)
     query = update.callback_query
     await query.answer()
 
@@ -126,7 +128,7 @@ async def paid_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "✅ <b>Great!</b>\n\n"
         "📸 Please send your payment screenshot, or\n"
         "📝 Type your UTR / Transaction ID\n\n"
-        "We'll verify and activate your plan .\n\n"
+        "We'll verify and activate your plan within 30 minutes.\n\n"
         "⏳ <i>Waiting for your proof...</i>"
     )
 
@@ -153,6 +155,8 @@ async def handle_payment_proof(
         context.user_data["awaiting_proof"] = False
         return False
 
+    db = get_db(context)
+    owner_ids = get_owner_ids(context)
     user = update.effective_user
 
     # Determine proof type and data
@@ -195,14 +199,14 @@ async def handle_payment_proof(
     context.user_data.pop("pending_order_id", None)
     context.user_data.pop("pending_product_id", None)
 
-    # Forward proof to BOTH owners (neither knows the other receives it)
+    # Forward proof to owners (dynamic per-bot)
     # Escape user-provided data to prevent HTML/Markdown parse errors
     safe_name = html.escape(user.first_name or 'Unknown')
     safe_username = html.escape(user.username) if user.username else ''
     safe_product_name = html.escape(product['name'])
     safe_price = html.escape(format_price(product['price']))
 
-    for owner_id in OWNER_IDS:
+    for owner_id in owner_ids:
         try:
             owner_text = (
                 f"🔔 <b>New Payment Proof Received</b>\n\n"
@@ -267,11 +271,12 @@ async def approve_callback(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ):
     """Handle order approval by owner — sends channel link to user."""
+    db = get_db(context)
     query = update.callback_query
     await query.answer()
 
     # Verify owner access (silent)
-    if query.from_user.id not in OWNER_IDS:
+    if query.from_user.id not in get_owner_ids(context):
         return
 
     order_id = int(query.data.split("_")[1])
@@ -337,11 +342,12 @@ async def reject_callback(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ):
     """Handle order rejection by owner — notifies user."""
+    db = get_db(context)
     query = update.callback_query
     await query.answer()
 
     # Verify owner access (silent)
-    if query.from_user.id not in OWNER_IDS:
+    if query.from_user.id not in get_owner_ids(context):
         return
 
     order_id = int(query.data.split("_")[1])

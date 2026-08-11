@@ -4,6 +4,7 @@ Turso DB connection via libsql_client with retry logic.
 Optimized for Turso free tier 10-second timeout.
 
 All video/media stored as Telegram file_ids only — NO binary blobs.
+Supports table prefix for multi-bot data isolation.
 """
 import json
 import asyncio
@@ -29,8 +30,9 @@ ORDER_COLS = [
 class Database:
     """Async database wrapper for Turso with automatic retry logic."""
 
-    def __init__(self):
+    def __init__(self, table_prefix=""):
         self.client = None
+        self.table_prefix = table_prefix
 
     # ──────────────── Connection Management ────────────────
 
@@ -50,7 +52,7 @@ class Database:
             self.client = libsql_client.create_client(
                 url=safe_url, auth_token=safe_token
             )
-            logger.info("Connected to Turso DB")
+            logger.info(f"Connected to Turso DB (prefix='{self.table_prefix}')")
         except Exception as e:
             logger.error(f"Failed to connect to Turso: {e}")
             raise
@@ -88,12 +90,17 @@ class Database:
         await self.connect()
         await self._create_tables()
         await self._set_defaults()
-        logger.info("Database initialized successfully")
+        logger.info(f"Database initialized (prefix='{self.table_prefix}')")
+
+    def _t(self, table_name):
+        """Get prefixed table name for multi-bot isolation."""
+        return f"{self.table_prefix}{table_name}"
 
     async def _create_tables(self):
         """Create all required tables if they don't exist."""
+        t = self._t
         tables = [
-            """CREATE TABLE IF NOT EXISTS products (
+            f"""CREATE TABLE IF NOT EXISTS {t('products')} (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL,
                 price REAL NOT NULL,
@@ -103,14 +110,14 @@ class Database:
                 sort_order INTEGER DEFAULT 0,
                 is_active INTEGER DEFAULT 1
             )""",
-            """CREATE TABLE IF NOT EXISTS users (
+            f"""CREATE TABLE IF NOT EXISTS {t('users')} (
                 user_id INTEGER PRIMARY KEY,
                 username TEXT DEFAULT '',
                 first_name TEXT DEFAULT '',
                 joined_at TEXT DEFAULT (datetime('now')),
                 is_banned INTEGER DEFAULT 0
             )""",
-            """CREATE TABLE IF NOT EXISTS orders (
+            f"""CREATE TABLE IF NOT EXISTS {t('orders')} (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER NOT NULL,
                 product_id INTEGER NOT NULL,
@@ -122,7 +129,7 @@ class Database:
                 resolved_by INTEGER DEFAULT 0,
                 utr_text TEXT DEFAULT ''
             )""",
-            """CREATE TABLE IF NOT EXISTS settings (
+            f"""CREATE TABLE IF NOT EXISTS {t('settings')} (
                 key TEXT PRIMARY KEY,
                 value TEXT DEFAULT ''
             )""",
@@ -132,7 +139,7 @@ class Database:
 
         # ── Migrations: add columns to existing tables if missing ──
         migrations = [
-            "ALTER TABLE orders ADD COLUMN utr_text TEXT DEFAULT ''",
+            f"ALTER TABLE {t('orders')} ADD COLUMN utr_text TEXT DEFAULT ''",
         ]
         for sql in migrations:
             try:
@@ -140,8 +147,36 @@ class Database:
             except Exception:
                 pass  # Column already exists
 
+        # ── Master tables (only for main bot — no prefix) ──
+        if not self.table_prefix:
+            master_tables = [
+                """CREATE TABLE IF NOT EXISTS hosted_bots (
+                    id TEXT PRIMARY KEY,
+                    bot_token TEXT NOT NULL UNIQUE,
+                    bot_username TEXT DEFAULT '',
+                    owner_user_id INTEGER NOT NULL,
+                    table_prefix TEXT NOT NULL UNIQUE,
+                    status TEXT DEFAULT 'active',
+                    created_at TEXT DEFAULT (datetime('now')),
+                    expires_at TEXT DEFAULT '',
+                    stopped_at TEXT DEFAULT '',
+                    stopped_reason TEXT DEFAULT ''
+                )""",
+                """CREATE TABLE IF NOT EXISTS hosting_logs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    bot_id TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    performed_by INTEGER DEFAULT 0,
+                    details TEXT DEFAULT '',
+                    created_at TEXT DEFAULT (datetime('now'))
+                )""",
+            ]
+            for sql in master_tables:
+                await self.execute(sql)
+
     async def _set_defaults(self):
         """Set default settings if not already present."""
+        t = self._t
         defaults = {
             "welcome_video_id": "",
             "welcome_photo_id": "",
@@ -165,8 +200,9 @@ class Database:
         self, name, price, description="", trial_file_ids="[]", channel_link=""
     ):
         """Add a new product. Returns product ID."""
+        t = self._t
         result = await self.execute(
-            "INSERT INTO products (name, price, description, trial_file_ids, channel_link) "
+            f"INSERT INTO {t('products')} (name, price, description, trial_file_ids, channel_link) "
             "VALUES (?, ?, ?, ?, ?)",
             [name, price, description, trial_file_ids, channel_link],
         )
@@ -174,9 +210,10 @@ class Database:
 
     async def get_product(self, product_id):
         """Get a single product by ID. Returns dict or None."""
+        t = self._t
         result = await self.execute(
-            "SELECT id, name, price, description, trial_file_ids, "
-            "channel_link, sort_order, is_active FROM products WHERE id = ?",
+            f"SELECT id, name, price, description, trial_file_ids, "
+            f"channel_link, sort_order, is_active FROM {t('products')} WHERE id = ?",
             [product_id],
         )
         if result.rows:
@@ -185,22 +222,24 @@ class Database:
 
     async def get_all_products(self, active_only=True):
         """Get all products. Returns list of dicts."""
+        t = self._t
         if active_only:
             result = await self.execute(
-                "SELECT id, name, price, description, trial_file_ids, "
-                "channel_link, sort_order, is_active FROM products "
+                f"SELECT id, name, price, description, trial_file_ids, "
+                f"channel_link, sort_order, is_active FROM {t('products')} "
                 "WHERE is_active = 1 ORDER BY sort_order, id"
             )
         else:
             result = await self.execute(
-                "SELECT id, name, price, description, trial_file_ids, "
-                "channel_link, sort_order, is_active FROM products "
+                f"SELECT id, name, price, description, trial_file_ids, "
+                f"channel_link, sort_order, is_active FROM {t('products')} "
                 "ORDER BY sort_order, id"
             )
         return [self._row_to_product(row) for row in result.rows]
 
     async def update_product(self, product_id, **kwargs):
         """Update product fields. Returns True on success."""
+        t = self._t
         valid = {
             "name", "price", "description", "trial_file_ids",
             "channel_link", "sort_order", "is_active",
@@ -211,35 +250,38 @@ class Database:
         set_clause = ", ".join(f"{k} = ?" for k in updates)
         values = list(updates.values()) + [product_id]
         await self.execute(
-            f"UPDATE products SET {set_clause} WHERE id = ?", values
+            f"UPDATE {t('products')} SET {set_clause} WHERE id = ?", values
         )
         return True
 
     async def delete_product(self, product_id):
         """Delete a product by ID."""
-        await self.execute("DELETE FROM products WHERE id = ?", [product_id])
+        t = self._t
+        await self.execute(f"DELETE FROM {t('products')} WHERE id = ?", [product_id])
         return True
 
     # ──────────────── USERS ────────────────
 
     async def add_user(self, user_id, username="", first_name=""):
         """Add or update a user. INSERT OR IGNORE then UPDATE for upsert."""
+        t = self._t
         await self.execute(
-            "INSERT OR IGNORE INTO users (user_id, username, first_name) "
+            f"INSERT OR IGNORE INTO {t('users')} (user_id, username, first_name) "
             "VALUES (?, ?, ?)",
             [user_id, username, first_name],
         )
         # Update username/first_name if they changed
         await self.execute(
-            "UPDATE users SET username = ?, first_name = ? WHERE user_id = ?",
+            f"UPDATE {t('users')} SET username = ?, first_name = ? WHERE user_id = ?",
             [username, first_name, user_id],
         )
 
     async def get_user(self, user_id):
         """Get user by ID. Returns dict or None."""
+        t = self._t
         result = await self.execute(
-            "SELECT user_id, username, first_name, joined_at, is_banned "
-            "FROM users WHERE user_id = ?",
+            f"SELECT user_id, username, first_name, joined_at, is_banned "
+            f"FROM {t('users')} WHERE user_id = ?",
             [user_id],
         )
         if result.rows:
@@ -248,21 +290,24 @@ class Database:
 
     async def get_all_users(self):
         """Get all users ordered by join date (newest first)."""
+        t = self._t
         result = await self.execute(
-            "SELECT user_id, username, first_name, joined_at, is_banned "
-            "FROM users ORDER BY joined_at DESC"
+            f"SELECT user_id, username, first_name, joined_at, is_banned "
+            f"FROM {t('users')} ORDER BY joined_at DESC"
         )
         return [dict(zip(USER_COLS, row)) for row in result.rows]
 
     async def get_user_count(self):
         """Get total user count."""
-        result = await self.execute("SELECT COUNT(*) FROM users")
+        t = self._t
+        result = await self.execute(f"SELECT COUNT(*) FROM {t('users')}")
         return result.rows[0][0] if result.rows else 0
 
     async def get_all_user_ids(self):
         """Get all non-banned user IDs (for broadcasting)."""
+        t = self._t
         result = await self.execute(
-            "SELECT user_id FROM users WHERE is_banned = 0"
+            f"SELECT user_id FROM {t('users')} WHERE is_banned = 0"
         )
         return [row[0] for row in result.rows]
 
@@ -272,8 +317,9 @@ class Database:
         self, user_id, product_id, payment_proof="", proof_type="", utr_text=""
     ):
         """Create a new order. Returns order ID."""
+        t = self._t
         result = await self.execute(
-            "INSERT INTO orders (user_id, product_id, payment_proof, proof_type, utr_text) "
+            f"INSERT INTO {t('orders')} (user_id, product_id, payment_proof, proof_type, utr_text) "
             "VALUES (?, ?, ?, ?, ?)",
             [user_id, product_id, payment_proof, proof_type, utr_text],
         )
@@ -281,10 +327,11 @@ class Database:
 
     async def get_order(self, order_id):
         """Get order by ID. Returns dict or None."""
+        t = self._t
         result = await self.execute(
-            "SELECT id, user_id, product_id, status, payment_proof, "
-            "proof_type, utr_text, created_at, resolved_at, resolved_by "
-            "FROM orders WHERE id = ?",
+            f"SELECT id, user_id, product_id, status, payment_proof, "
+            f"proof_type, utr_text, created_at, resolved_at, resolved_by "
+            f"FROM {t('orders')} WHERE id = ?",
             [order_id],
         )
         if result.rows:
@@ -293,25 +340,28 @@ class Database:
 
     async def update_order_status(self, order_id, status, resolved_by=0):
         """Update order status (pending → approved / rejected)."""
+        t = self._t
         await self.execute(
-            "UPDATE orders SET status = ?, resolved_by = ?, "
+            f"UPDATE {t('orders')} SET status = ?, resolved_by = ?, "
             "resolved_at = datetime('now') WHERE id = ?",
             [status, resolved_by, order_id],
         )
 
     async def update_order_proof(self, order_id, payment_proof, proof_type, utr_text=""):
         """Attach payment proof (screenshot file_id or UTR text) to an order."""
+        t = self._t
         await self.execute(
-            "UPDATE orders SET payment_proof = ?, proof_type = ?, utr_text = ? WHERE id = ?",
+            f"UPDATE {t('orders')} SET payment_proof = ?, proof_type = ?, utr_text = ? WHERE id = ?",
             [payment_proof, proof_type, utr_text, order_id],
         )
 
     async def get_pending_orders(self):
         """Get all pending orders (newest first)."""
+        t = self._t
         result = await self.execute(
-            "SELECT id, user_id, product_id, status, payment_proof, "
-            "proof_type, utr_text, created_at, resolved_at, resolved_by "
-            "FROM orders WHERE status = 'pending' ORDER BY created_at DESC"
+            f"SELECT id, user_id, product_id, status, payment_proof, "
+            f"proof_type, utr_text, created_at, resolved_at, resolved_by "
+            f"FROM {t('orders')} WHERE status = 'pending' ORDER BY created_at DESC"
         )
         return [dict(zip(ORDER_COLS, row)) for row in result.rows]
 
@@ -319,8 +369,9 @@ class Database:
 
     async def get_setting(self, key):
         """Get a setting value by key. Returns str or None."""
+        t = self._t
         result = await self.execute(
-            "SELECT value FROM settings WHERE key = ?", [key]
+            f"SELECT value FROM {t('settings')} WHERE key = ?", [key]
         )
         if result.rows:
             return result.rows[0][0]
@@ -328,8 +379,9 @@ class Database:
 
     async def set_setting(self, key, value):
         """Set or update a setting (upsert)."""
+        t = self._t
         await self.execute(
-            "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
+            f"INSERT OR REPLACE INTO {t('settings')} (key, value) VALUES (?, ?)",
             [key, str(value)],
         )
 
@@ -337,29 +389,30 @@ class Database:
 
     async def get_stats(self):
         """Get aggregated bot statistics."""
+        t = self._t
         user_count = await self.get_user_count()
 
-        total = await self.execute("SELECT COUNT(*) FROM orders")
+        total = await self.execute(f"SELECT COUNT(*) FROM {t('orders')}")
         total_orders = total.rows[0][0] if total.rows else 0
 
         approved = await self.execute(
-            "SELECT COUNT(*) FROM orders WHERE status = 'approved'"
+            f"SELECT COUNT(*) FROM {t('orders')} WHERE status = 'approved'"
         )
         approved_orders = approved.rows[0][0] if approved.rows else 0
 
         pending = await self.execute(
-            "SELECT COUNT(*) FROM orders WHERE status = 'pending'"
+            f"SELECT COUNT(*) FROM {t('orders')} WHERE status = 'pending'"
         )
         pending_orders = pending.rows[0][0] if pending.rows else 0
 
         rejected = await self.execute(
-            "SELECT COUNT(*) FROM orders WHERE status = 'rejected'"
+            f"SELECT COUNT(*) FROM {t('orders')} WHERE status = 'rejected'"
         )
         rejected_orders = rejected.rows[0][0] if rejected.rows else 0
 
         revenue = await self.execute(
-            "SELECT COALESCE(SUM(p.price), 0) FROM orders o "
-            "JOIN products p ON o.product_id = p.id "
+            f"SELECT COALESCE(SUM(p.price), 0) FROM {t('orders')} o "
+            f"JOIN {t('products')} p ON o.product_id = p.id "
             "WHERE o.status = 'approved'"
         )
         total_revenue = revenue.rows[0][0] if revenue.rows else 0
@@ -372,6 +425,23 @@ class Database:
             "rejected_orders": rejected_orders,
             "total_revenue": total_revenue,
         }
+
+    # ──────────────── TABLE MANAGEMENT (Multi-Bot) ────────────────
+
+    async def drop_all_tables(self):
+        """Drop all tables with this prefix. Used for bot deletion/expiry cleanup."""
+        if not self.table_prefix:
+            logger.warning("Refusing to drop unprefixed tables (main bot)")
+            return False
+        t = self._t
+        tables = [t('products'), t('users'), t('orders'), t('settings')]
+        for table in tables:
+            try:
+                await self.execute(f"DROP TABLE IF EXISTS {table}")
+                logger.info(f"Dropped table: {table}")
+            except Exception as e:
+                logger.warning(f"Failed to drop table {table}: {e}")
+        return True
 
     # ──────────────── HELPERS ────────────────
 
@@ -396,5 +466,5 @@ class Database:
             self.client = None
 
 
-# ── Global database instance (shared across all handlers) ──
+# ── Global database instance (main bot — no prefix) ──
 db = Database()

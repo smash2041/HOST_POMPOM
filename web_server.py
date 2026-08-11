@@ -1,7 +1,7 @@
 """
 VIP Access Bot — Web Server
-aiohttp server for Render health checks and UptimeRobot pings.
-Keeps the Render free-tier service alive 24/7.
+aiohttp server for health checks and monitoring.
+Simplified for AWS EC2 deployment (no Render keep-alive needed).
 """
 import time
 from aiohttp import web
@@ -10,7 +10,7 @@ start_time = time.time()
 
 
 async def handle_root(request):
-    """Root endpoint — Render health check."""
+    """Root endpoint — health check."""
     uptime = int(time.time() - start_time)
     hours, remainder = divmod(uptime, 3600)
     minutes, seconds = divmod(remainder, 60)
@@ -24,7 +24,7 @@ async def handle_root(request):
 
 
 async def handle_ping(request):
-    """Ping endpoint — for UptimeRobot / cron-job.org."""
+    """Ping endpoint — for monitoring services."""
     return web.json_response(
         {"status": "ok", "uptime": int(time.time() - start_time)}
     )
@@ -50,7 +50,7 @@ def create_web_app():
     app.router.add_get("/ping", handle_ping)
     app.router.add_get("/health", handle_health)
     
-    # Add HEAD handlers for UptimeRobot compatibility
+    # Add HEAD handlers for monitoring compatibility
     app.router.add_head("/", handle_root)
     app.router.add_head("/ping", handle_ping)
     app.router.add_head("/health", handle_health)

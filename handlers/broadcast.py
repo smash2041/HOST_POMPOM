@@ -7,7 +7,7 @@ import asyncio
 import logging
 from telegram.ext import ContextTypes
 
-from database import db
+from utils.bot_helpers import get_db
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +28,7 @@ async def broadcast_message(
     Returns:
         Tuple of (success_count, failed_count)
     """
+    db = get_db(context)
     user_ids = await db.get_all_user_ids()
     success = 0
     failed = 0

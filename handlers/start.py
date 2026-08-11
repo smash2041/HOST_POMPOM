@@ -8,7 +8,7 @@ import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, InputMediaVideo
 from telegram.ext import ContextTypes
 
-from database import db
+from utils.bot_helpers import get_db, get_forward_protection, get_auto_disappear
 from utils.helpers import format_price
 
 logger = logging.getLogger(__name__)
@@ -17,23 +17,22 @@ logger = logging.getLogger(__name__)
 WELCOME_TEXT = """🎉 *Welcome to VIP Access Bot!*
 
 ✨ Get exclusive access to premium content
-
 💰 Affordable plans starting at just ₹99
-✨ Cotent quality aisi ki dekhi nahi hogi 
+✨ Content quality aisi ki dekhi nahi hogi 
 ✨ Only Premium Content
 ✨ Daily New Uploads
-✨ Cp, Rp, Indian, Foreign, Dark 
-✨ 10000+ Cp videos
-✨  25000+ Rp videos 
-✨  M0m S0n 5k Videos
+✨ 10000+ videos
+✨ 25000+ videos 
+✨ 5k Videos
 
 ✨ *TRY OUR ANY PLAN FOR CHECKING THE QUALITY* ✨
 
 👇 *Choose a plan below to get started:*"""
 
 
-async def build_product_keyboard() -> InlineKeyboardMarkup:
+async def build_product_keyboard(context) -> InlineKeyboardMarkup:
     """Build inline keyboard with dynamic product buttons + optional proof."""
+    db = get_db(context)
     products = await db.get_all_products()
     keyboard = []
 
@@ -74,6 +73,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     2. Send welcome video/photo (via file_id)
     3. Send welcome message with dynamic product buttons
     """
+    db = get_db(context)
     user = update.effective_user
 
     # Register / update user
@@ -83,9 +83,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         first_name=user.first_name or "",
     )
 
-    # Send welcome media
-    fwd_protect = await db.get_setting("forward_protection")
-    protect = fwd_protect == "1"
+    # Send welcome media — forward protection is GLOBAL (from main bot)
+    protect = await get_forward_protection(context)
 
     media_ids_json = await db.get_setting("welcome_media_ids")
     if media_ids_json and media_ids_json != "[]":
@@ -132,7 +131,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     pass
 
     # Send welcome message with product buttons
-    reply_markup = await build_product_keyboard()
+    reply_markup = await build_product_keyboard(context)
     await update.message.reply_text(
         WELCOME_TEXT, reply_markup=reply_markup, parse_mode="Markdown"
     )
@@ -143,6 +142,7 @@ async def product_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     Handle product button click.
     Shows trial videos (via file_id) + Buy Now / Back buttons.
     """
+    db = get_db(context)
     query = update.callback_query
     await query.answer()
 
@@ -156,11 +156,9 @@ async def product_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Send trial media as Telegram Albums (Media Group)
     trial_ids = product.get("trial_file_ids_list", [])
     if trial_ids:
-        # Check forward protection & auto disappear settings
-        fwd_protect = await db.get_setting("forward_protection")
-        protect = fwd_protect == "1"
-        auto_disappear = await db.get_setting("auto_disappear")
-        should_disappear = auto_disappear == "1"
+        # Check forward protection & auto disappear — GLOBAL settings
+        protect = await get_forward_protection(context)
+        should_disappear = await get_auto_disappear(context)
         sent_messages = []  # track for auto-delete
 
         media_group = []
@@ -242,7 +240,7 @@ async def back_to_products_callback(
     query = update.callback_query
     await query.answer()
 
-    reply_markup = await build_product_keyboard()
+    reply_markup = await build_product_keyboard(context)
 
     try:
         await query.edit_message_text(
@@ -262,6 +260,7 @@ async def show_proof_callback(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ):
     """Handle proof button click — show proof photo if available."""
+    db = get_db(context)
     query = update.callback_query
     await query.answer()
 
@@ -288,6 +287,7 @@ async def show_proof_callback(
 
 async def how_to_use_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle How to Use button click."""
+    db = get_db(context)
     query = update.callback_query
     await query.answer()
 
