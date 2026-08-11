@@ -1,0 +1,58 @@
+"""
+VIP Access Bot — Web Server
+aiohttp server for Render health checks and UptimeRobot pings.
+Keeps the Render free-tier service alive 24/7.
+"""
+import time
+from aiohttp import web
+
+start_time = time.time()
+
+
+async def handle_root(request):
+    """Root endpoint — Render health check."""
+    uptime = int(time.time() - start_time)
+    hours, remainder = divmod(uptime, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    return web.Response(
+        text=(
+            f"🤖 VIP Access Bot is alive!\n"
+            f"⏱ Uptime: {hours}h {minutes}m {seconds}s"
+        ),
+        content_type="text/plain",
+    )
+
+
+async def handle_ping(request):
+    """Ping endpoint — for UptimeRobot / cron-job.org."""
+    return web.json_response(
+        {"status": "ok", "uptime": int(time.time() - start_time)}
+    )
+
+
+async def handle_health(request):
+    """Detailed health check endpoint."""
+    return web.json_response(
+        {
+            "status": "healthy",
+            "uptime": int(time.time() - start_time),
+            "service": "VIP Access Bot",
+        }
+    )
+
+
+def create_web_app():
+    """Create and return the aiohttp web application."""
+    app = web.Application()
+    
+    # Add GET handlers
+    app.router.add_get("/", handle_root)
+    app.router.add_get("/ping", handle_ping)
+    app.router.add_get("/health", handle_health)
+    
+    # Add HEAD handlers for UptimeRobot compatibility
+    app.router.add_head("/", handle_root)
+    app.router.add_head("/ping", handle_ping)
+    app.router.add_head("/health", handle_health)
+    
+    return app

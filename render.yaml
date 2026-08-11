@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: vip-access-bot
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: TURSO_URL
+        sync: false
+      - key: TURSO_AUTH_TOKEN
+        sync: false
+      - key: OWNER_1
+        sync: false
+      - key: OWNER_2
+        sync: false
+      - key: UPI_ID
+        sync: false
+      - key: PYTHON_VERSION
+        value: 3.11.0
