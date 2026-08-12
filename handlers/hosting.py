@@ -46,12 +46,12 @@ async def hosting_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         [InlineKeyboardButton("🔙 Back to Admin", callback_data="hst_back")],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    text = "🤖 *Bot Hosting Management*\n\nSelect an option:"
+    text = "🤖 <b>Bot Hosting Management</b>\n\nSelect an option:"
 
     if update.callback_query:
-        await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode="Markdown")
+        await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode="HTML")
     else:
-        await update.effective_message.reply_text(text, reply_markup=reply_markup, parse_mode="Markdown")
+        await update.effective_message.reply_text(text, reply_markup=reply_markup, parse_mode="HTML")
 
     return HOST_LIST
 
@@ -84,14 +84,14 @@ async def hosting_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 async def host_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Step 1: Ask for bot token."""
     text = (
-        "🤖 *Host New Bot*\n\n"
+        "🤖 <b>Host New Bot</b>\n\n"
         "📝 Send the Bot API Token (from @BotFather):\n\n"
-        "_Send /cancel to abort_"
+        "<i>Send /cancel to abort</i>"
     )
     if update.callback_query:
-        await update.callback_query.edit_message_text(text, parse_mode="Markdown")
+        await update.callback_query.edit_message_text(text, parse_mode="HTML")
     else:
-        await update.effective_message.reply_text(text, parse_mode="Markdown")
+        await update.effective_message.reply_text(text, parse_mode="HTML")
     return HOST_TOKEN
 
 
@@ -103,18 +103,18 @@ async def host_token(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if ":" not in token or len(token) < 30:
         await update.message.reply_text(
             "❌ Invalid token format. Telegram bot tokens look like:\n"
-            "`1234567890:ABCdefGHIjklMNOpqrSTUvwxYZ`\n\n"
+            "<code>1234567890:ABCdefGHIjklMNOpqrSTUvwxYZ</code>\n\n"
             "Please send a valid token:",
-            parse_mode="Markdown"
+            parse_mode="HTML"
         )
         return HOST_TOKEN
 
     context.user_data["host_token"] = token
     await update.message.reply_text(
         "✅ Token received.\n\n"
-        "👤 Now send the *Telegram User ID* of the bot owner:\n\n"
-        "_This user will get admin access to the hosted bot_",
-        parse_mode="Markdown"
+        "👤 Now send the <b>Telegram User ID</b> of the bot owner:\n\n"
+        "<i>This user will get admin access to the hosted bot</i>",
+        parse_mode="HTML"
     )
     return HOST_OWNER_ID
 
@@ -190,15 +190,15 @@ async def show_hosted_bots(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         keyboard.append([InlineKeyboardButton(btn_text, callback_data=f"hst_bot_{bot_id}")])
 
     if not bots:
-        text = "📋 *Hosted Bots*\n\n_No bots hosted yet._"
+        text = "📋 <b>Hosted Bots</b>\n\n<i>No bots hosted yet.</i>"
     else:
-        text = f"📋 *Hosted Bots* ({len(bots)})\n\nSelect a bot to manage:"
+        text = f"📋 <b>Hosted Bots</b> ({len(bots)})\n\nSelect a bot to manage:"
 
     keyboard.append([InlineKeyboardButton("🔙 Back to Hosting Menu", callback_data="hst_menu")])
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     if update.callback_query:
-        await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode="Markdown")
+        await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode="HTML")
     return HOST_LIST
 
 
@@ -255,19 +255,19 @@ async def bot_action_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, bo
     status_emoji = "🟢" if status == "active" else "🔴" if status == "stopped" else "⏰"
 
     text = (
-        f"🤖 *Bot Details*\n\n"
+        f"🤖 <b>Bot Details</b>\n\n"
         f"📛 Username: @{bot_username}\n"
-        f"🆔 Bot ID: `{bot_id}`\n"
-        f"👤 Owner: `{owner_uid}`\n"
+        f"🆔 Bot ID: <code>{bot_id}</code>\n"
+        f"👤 Owner: <code>{owner_uid}</code>\n"
         f"📊 Status: {status_emoji} {status.upper()}\n"
-        f"📅 Created: {created_at[:16]}\n"
+        f"📅 Created: {created_at[:16] if created_at else '?'}\n"
         f"⏰ Expiry: {expires_at[:16] if expires_at else 'Never'}"
     )
 
     if update.callback_query:
-        await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode="Markdown")
+        await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode="HTML")
     else:
-        await update.effective_message.reply_text(text, reply_markup=reply_markup, parse_mode="Markdown")
+        await update.effective_message.reply_text(text, reply_markup=reply_markup, parse_mode="HTML")
 
     return HOST_ACTION
 
@@ -340,13 +340,13 @@ async def bot_delete_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE)
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     text = (
-        "⚠️ *DANGER ZONE* ⚠️\n\n"
-        "Are you sure you want to *DELETE* this bot?\n\n"
+        "⚠️ <b>DANGER ZONE</b> ⚠️\n\n"
+        "Are you sure you want to <b>DELETE</b> this bot?\n\n"
         "🗑 ALL bot data (products, users, orders, settings) will be permanently erased.\n\n"
-        "⚠️ *This action cannot be undone!*"
+        "⚠️ <b>This action cannot be undone!</b>"
     )
 
-    await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode="Markdown")
+    await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode="HTML")
     return HOST_CONFIRM
 
 
@@ -441,18 +441,18 @@ async def bot_expiry_selected(update: Update, context: ContextTypes.DEFAULT_TYPE
             bot_username = bot_record.get("bot_username", "unknown")
 
             text = (
-                f"✅ *Bot Hosted Successfully!*\n\n"
+                f"✅ <b>Bot Hosted Successfully!</b>\n\n"
                 f"🤖 @{bot_username}\n"
-                f"👤 Owner: `{owner_id}`\n"
+                f"👤 Owner: <code>{owner_id}</code>\n"
                 f"⏰ Expiry: {expires_at[:16] if expires_at else 'Never'}\n\n"
                 f"The bot is now live and accepting commands!"
             )
         except Exception as e:
             logger.error(f"Error hosting new bot: {e}")
-            text = f"❌ *Failed to host bot*\n\n{e}"
+            text = f"❌ <b>Failed to host bot</b>\n\n{e}"
 
         keyboard = [[InlineKeyboardButton("🔙 Back to Hosting Menu", callback_data="hst_menu")]]
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
 
         # Clean up user_data
         context.user_data.pop("host_token", None)
@@ -492,16 +492,16 @@ async def bot_view_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         stats = await bot_manager.get_bot_stats(bot_id)
 
         if not stats:
-            text = "📊 *Bot Stats*\n\n_No data available._"
+            text = "📊 <b>Bot Stats</b>\n\n<i>No data available.</i>"
         else:
             text = (
-                f"📊 *Bot Stats*\n\n"
-                f"👥 Users: *{stats.get('total_users', 0)}*\n"
-                f"📦 Orders: *{stats.get('total_orders', 0)}*\n"
-                f"✅ Approved: *{stats.get('approved_orders', 0)}*\n"
-                f"⏳ Pending: *{stats.get('pending_orders', 0)}*\n"
-                f"❌ Rejected: *{stats.get('rejected_orders', 0)}*\n"
-                f"💰 Revenue: *₹{stats.get('total_revenue', 0)}*"
+                f"📊 <b>Bot Stats</b>\n\n"
+                f"👥 Users: <b>{stats.get('total_users', 0)}</b>\n"
+                f"📦 Orders: <b>{stats.get('total_orders', 0)}</b>\n"
+                f"✅ Approved: <b>{stats.get('approved_orders', 0)}</b>\n"
+                f"⏳ Pending: <b>{stats.get('pending_orders', 0)}</b>\n"
+                f"❌ Rejected: <b>{stats.get('rejected_orders', 0)}</b>\n"
+                f"💰 Revenue: <b>₹{stats.get('total_revenue', 0)}</b>"
             )
     except Exception as e:
         logger.error(f"Error fetching stats for {bot_id}: {e}")
@@ -510,7 +510,7 @@ async def bot_view_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     keyboard = [[InlineKeyboardButton("🔙 Back", callback_data="hst_bk_bot")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
-    await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode="Markdown")
+    await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode="HTML")
     return HOST_ACTION
 
 
