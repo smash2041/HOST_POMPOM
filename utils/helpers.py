@@ -1,5 +1,5 @@
 """
-Helper utility functions for the bot.
+Host Bot — Helper Utilities
 """
 
 

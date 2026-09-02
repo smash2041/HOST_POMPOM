@@ -1,15 +1,15 @@
 """
-VIP Access Bot — Payment Flow Handlers
+Host Bot — Payment Flow Handlers
 Handles: Buy → QR display → I Have Paid → Proof collection → Owner approve/reject.
-Dynamic UPI QR auto-generation OR custom QR image from admin panel.
+MIRROR: Products from main DB, UPI/QR from overrides, orders in per-bot DB.
 """
 import html
 import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 
-from utils.bot_helpers import get_db, get_owner_ids
-from config import UPI_ID
+from utils.bot_helpers import get_db, get_owner_ids, get_upi_id, get_qr_image_id, get_products_db
+from utils.media_clone import get_translated_file_id
 from utils.qr_generator import generate_upi_qr
 from utils.helpers import format_price
 
@@ -19,25 +19,26 @@ logger = logging.getLogger(__name__)
 async def buy_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Handle Buy Now button.
-    Shows UPI QR (auto-generated or custom) + payment instructions.
+    Shows UPI QR (override or auto-generated) + payment instructions.
+    Product from main DB, UPI/QR from override system.
     """
-    db = get_db(context)
+    products_db = await get_products_db(context)
     query = update.callback_query
     await query.answer()
 
     product_id = int(query.data.split("_")[1])
-    product = await db.get_product(product_id)
+    product = await products_db.get_product(product_id)
 
     if not product:
         await query.message.reply_text("❌ Product not found.")
         return
 
-    # Store buying context for later
+    # Store buying context
     context.user_data["buying_product_id"] = product_id
 
-    # Get UPI settings
-    upi_id = await db.get_setting("upi_id") or UPI_ID
-    custom_qr = await db.get_setting("qr_image_id")
+    # Get UPI/QR (checks overrides for hosted bots)
+    upi_id = await get_upi_id(context)
+    custom_qr = await get_qr_image_id(context)
 
     product_name = html.escape(product['name'])
     price_str = html.escape(format_price(product['price']))
@@ -67,7 +68,8 @@ async def buy_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         if custom_qr:
-            # Use custom QR image uploaded by owner
+            translated_id = await get_translated_file_id(context, f"photo:{custom_qr}")
+            custom_qr = translated_id.replace("photo:", "")
             await context.bot.send_photo(
                 chat_id=query.message.chat_id,
                 photo=custom_qr,
@@ -76,7 +78,6 @@ async def buy_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="HTML",
             )
         else:
-            # Auto-generate dynamic QR with plan price
             qr_buffer = generate_upi_qr(
                 upi_id, product["price"], product["name"]
             )
@@ -89,7 +90,6 @@ async def buy_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
     except Exception as e:
         logger.error(f"Error sending payment QR: {e}")
-        # Fallback: send text-only payment info
         await context.bot.send_message(
             chat_id=query.message.chat_id,
             text=caption,
@@ -101,25 +101,26 @@ async def buy_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def paid_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Handle 'I Have Paid' button.
-    Creates a pending order and asks user for payment proof.
+    Creates a pending order in per-bot DB and asks user for payment proof.
     """
     db = get_db(context)
+    products_db = await get_products_db(context)
     query = update.callback_query
     await query.answer()
 
     product_id = int(query.data.split("_")[1])
-    product = await db.get_product(product_id)
+    product = await products_db.get_product(product_id)
 
     if not product:
         await query.message.reply_text("❌ Product not found.")
         return
 
-    # Create pending order in DB
+    # Create pending order in per-bot DB
     order_id = await db.create_order(
         user_id=query.from_user.id, product_id=product_id
     )
 
-    # Set awaiting-proof state in user_data
+    # Set awaiting-proof state
     context.user_data["awaiting_proof"] = True
     context.user_data["pending_order_id"] = order_id
     context.user_data["pending_product_id"] = product_id
@@ -143,9 +144,7 @@ async def handle_payment_proof(
     """
     Handle payment proof (screenshot or UTR) from user.
     Called from the global message handler.
-
-    Returns:
-        True if this message was handled as payment proof, False otherwise.
+    Orders in per-bot DB, products from main DB.
     """
     if not context.user_data.get("awaiting_proof"):
         return False
@@ -156,26 +155,26 @@ async def handle_payment_proof(
         return False
 
     db = get_db(context)
+    products_db = await get_products_db(context)
     owner_ids = get_owner_ids(context)
     user = update.effective_user
 
     # Determine proof type and data
-    utr_text = ""  # Capture UTR/Transaction ID from caption or text
+    utr_text = ""
     if update.message.photo:
-        proof_data = update.message.photo[-1].file_id  # Highest resolution
+        proof_data = update.message.photo[-1].file_id
         proof_type = "screenshot"
-        # Capture caption as UTR if user typed it with the screenshot
         if update.message.caption:
             utr_text = update.message.caption.strip()
     elif update.message.document:
         proof_data = update.message.document.file_id
-        proof_type = "screenshot"
+        proof_type = "document"
         if update.message.caption:
             utr_text = update.message.caption.strip()
     elif update.message.text:
         proof_data = update.message.text.strip()
         proof_type = "utr"
-        utr_text = proof_data  # Store UTR text in dedicated field too
+        utr_text = proof_data
         if not proof_data:
             await update.message.reply_text(
                 "❌ Please send a valid screenshot or UTR/Transaction ID."
@@ -187,24 +186,23 @@ async def handle_payment_proof(
         )
         return True
 
-    # Update order with proof
+    # Update order with proof in per-bot DB
     await db.update_order_proof(order_id, proof_data, proof_type, utr_text)
 
     # Get order and product details
     order = await db.get_order(order_id)
-    product = await db.get_product(order["product_id"])
+    product = await products_db.get_product(order["product_id"])
 
-    # Clear awaiting state BEFORE notifying owners
+    # Clear awaiting state
     context.user_data["awaiting_proof"] = False
     context.user_data.pop("pending_order_id", None)
     context.user_data.pop("pending_product_id", None)
 
-    # Forward proof to owners (dynamic per-bot)
-    # Escape user-provided data to prevent HTML/Markdown parse errors
+    # Forward proof to owners
     safe_name = html.escape(user.first_name or 'Unknown')
     safe_username = html.escape(user.username) if user.username else ''
-    safe_product_name = html.escape(product['name'])
-    safe_price = html.escape(format_price(product['price']))
+    safe_product_name = html.escape(product['name']) if product else 'VIP Plan (Deleted)'
+    safe_price = html.escape(format_price(product['price'])) if product else 'N/A'
 
     for owner_id in owner_ids:
         try:
@@ -233,18 +231,27 @@ async def handle_payment_proof(
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
 
-            if proof_type == "screenshot":
-                # Add UTR to caption if user typed it with screenshot
+            if proof_type in ("screenshot", "document"):
                 if utr_text:
                     safe_utr = html.escape(utr_text)
                     owner_text += f"\n\n💬 UTR/Transaction ID:\n<code>{safe_utr}</code>"
-                await context.bot.send_photo(
-                    chat_id=owner_id,
-                    photo=proof_data,
-                    caption=owner_text,
-                    reply_markup=reply_markup,
-                    parse_mode="HTML",
-                )
+                
+                if proof_type == "screenshot":
+                    await context.bot.send_photo(
+                        chat_id=owner_id,
+                        photo=proof_data,
+                        caption=owner_text,
+                        reply_markup=reply_markup,
+                        parse_mode="HTML",
+                    )
+                else:
+                    await context.bot.send_document(
+                        chat_id=owner_id,
+                        document=proof_data,
+                        caption=owner_text,
+                        reply_markup=reply_markup,
+                        parse_mode="HTML",
+                    )
             else:
                 safe_proof = html.escape(proof_data)
                 owner_text += f"\n\n💬 UTR/Transaction ID:\n<code>{safe_proof}</code>"
@@ -272,10 +279,11 @@ async def approve_callback(
 ):
     """Handle order approval by owner — sends channel link to user."""
     db = get_db(context)
+    products_db = await get_products_db(context)
     query = update.callback_query
     await query.answer()
 
-    # Verify owner access (silent)
+    # Verify owner access
     if query.from_user.id not in get_owner_ids(context):
         return
 
@@ -292,7 +300,7 @@ async def approve_callback(
         )
         return
 
-    product = await db.get_product(order["product_id"])
+    product = await products_db.get_product(order["product_id"])
 
     # Approve the order
     await db.update_order_status(order_id, "approved", query.from_user.id)
@@ -300,7 +308,7 @@ async def approve_callback(
     # Send channel link to user
     channel_link = product.get("channel_link", "") if product else ""
     try:
-        safe_prod = html.escape(product['name'])
+        safe_prod = html.escape(product['name']) if product else 'VIP Plan'
         user_text = (
             f"🎉 <b>Congratulations!</b>\n\n"
             f"✅ Your payment for <b>{safe_prod}</b> has been approved!\n\n"
@@ -322,7 +330,7 @@ async def approve_callback(
             f"Failed to send approval to user {order['user_id']}: {e}"
         )
 
-    # Update owner's message to show approved status
+    # Update owner's message
     try:
         if query.message.caption:
             new_caption = query.message.caption + "\n\n✅ <b>APPROVED</b> ✅"
@@ -343,10 +351,11 @@ async def reject_callback(
 ):
     """Handle order rejection by owner — notifies user."""
     db = get_db(context)
+    products_db = await get_products_db(context)
     query = update.callback_query
     await query.answer()
 
-    # Verify owner access (silent)
+    # Verify owner access
     if query.from_user.id not in get_owner_ids(context):
         return
 
@@ -363,14 +372,14 @@ async def reject_callback(
         )
         return
 
-    product = await db.get_product(order["product_id"])
+    product = await products_db.get_product(order["product_id"])
 
     # Reject the order
     await db.update_order_status(order_id, "rejected", query.from_user.id)
 
     # Notify user
     try:
-        safe_prod = html.escape(product['name'])
+        safe_prod = html.escape(product['name']) if product else 'VIP Plan'
         await context.bot.send_message(
             chat_id=order["user_id"],
             text=(
@@ -385,7 +394,7 @@ async def reject_callback(
             f"Failed to send rejection to user {order['user_id']}: {e}"
         )
 
-    # Update owner's message to show rejected status
+    # Update owner's message
     try:
         if query.message.caption:
             new_caption = query.message.caption + "\n\n❌ <b>REJECTED</b> ❌"

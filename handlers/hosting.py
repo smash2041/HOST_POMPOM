@@ -1,31 +1,36 @@
 """
-VIP Access Bot — Hosting Management UI
-Admin panel for managing hosted bots.
-Only accessible to OWNER_ID on the main bot.
+Host Bot — Hosting Management Handler
+Manages bot hosting lifecycle: host/stop/resume/delete.
+OWNER sees full management, hosting admins see self-service.
 """
 import logging
+import asyncio
 from datetime import datetime, timedelta
-
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ContextTypes, CallbackQueryHandler, MessageHandler, filters
+from telegram.ext import (
+    ContextTypes,
+    CallbackQueryHandler,
+    MessageHandler,
+    filters,
+)
 
-from utils.bot_helpers import is_main_bot
+from utils.bot_helpers import get_main_db
 from config import OWNER_ID
 
 logger = logging.getLogger(__name__)
 
-# Import ADMIN_MENU as constant (not from admin.py to avoid circular imports)
+# ── States (20-25, avoid conflict with admin states 0-19) ──
 ADMIN_MENU = 0
+HOST_TOKEN = 20
+HOST_OWNER_ID = 21
+HOST_EXPIRY = 22
+HOST_LIST = 23
+HOST_ACTION = 24
+HOST_CONFIRM = 25
 
-# ConversationHandler states (start from 20 to avoid conflict with admin states 0-19)
-(
-    HOST_TOKEN, HOST_OWNER_ID, HOST_EXPIRY,
-    HOST_LIST, HOST_ACTION, HOST_CONFIRM,
-) = range(20, 26)
 
-
-def get_bot_manager(context: ContextTypes.DEFAULT_TYPE):
-    """Get the BotManager instance from bot_data."""
+def get_bot_manager(context):
+    """Get the BotManager from context."""
     return context.bot_data.get("bot_manager")
 
 
@@ -34,102 +39,169 @@ def get_bot_manager(context: ContextTypes.DEFAULT_TYPE):
 # ═══════════════════════════════════════════════
 
 async def hosting_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Show hosting management menu."""
-    if update.effective_user.id != OWNER_ID or not is_main_bot(context):
-        if update.callback_query:
-            await update.callback_query.answer("Unauthorized.", show_alert=True)
-        return ADMIN_MENU
-
-    keyboard = [
-        [InlineKeyboardButton("🤖 Host New Bot", callback_data="hst_new")],
-        [InlineKeyboardButton("📋 List Hosted Bots", callback_data="hst_list")],
-        [InlineKeyboardButton("🔙 Back to Admin", callback_data="hst_back")],
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    text = "🤖 <b>Bot Hosting Management</b>\n\nSelect an option:"
-
-    if update.callback_query:
-        await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode="HTML")
-    else:
-        await update.effective_message.reply_text(text, reply_markup=reply_markup, parse_mode="HTML")
-
-    return HOST_LIST
-
-
-async def hosting_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Route button clicks from the hosting menu."""
+    """Show hosting menu — different for owner vs admin."""
     query = update.callback_query
-    await query.answer()
+    if query:
+        await query.answer()
 
-    if query.data == "hst_new":
-        return await host_start(update, context)
-    elif query.data == "hst_list":
-        return await show_hosted_bots(update, context)
-    elif query.data == "hst_back":
-        # Return to admin menu — import inline to avoid circular
-        from handlers.admin import _show_admin_menu
-        return await _show_admin_menu(update, context)
-    elif query.data.startswith("hst_bot_"):
-        return await bot_action_menu(update, context)
-    elif query.data == "hst_menu":
-        return await hosting_menu(update, context)
+    user_id = update.effective_user.id
+
+    if user_id == OWNER_ID:
+        keyboard = [
+            [InlineKeyboardButton("🤖 Host New Bot", callback_data="hst_new")],
+            [InlineKeyboardButton("📋 List Hosted Bots", callback_data="hst_list")],
+            [InlineKeyboardButton("🔙 Back to Admin", callback_data="adm_back")],
+        ]
+        text = "👑 <b>Master Hosting Management</b>\n\nChoose an action:"
+    else:
+        main_db = get_main_db(context)
+        hosted_bot = await main_db.get_hosted_bot_by_admin(user_id)
+
+        if not hosted_bot:
+            keyboard = [
+                [InlineKeyboardButton("🤖 Host My Bot", callback_data="hst_new")],
+                [InlineKeyboardButton("🔙 Back", callback_data="adm_back")],
+            ]
+            text = "🤖 <b>Host Your Own Bot</b>\n\nYou don't have a hosted bot yet.\nClick below to host one!"
+        else:
+            status_emoji = "🟢" if hosted_bot["status"] == "active" else "🔴"
+            keyboard = [
+                [InlineKeyboardButton("📊 My Bot Status", callback_data="hst_my_status")],
+                [InlineKeyboardButton("🗑 Delete My Bot", callback_data="hst_my_delete")],
+                [InlineKeyboardButton("🔙 Back", callback_data="adm_back")],
+            ]
+            text = (
+                f"🤖 <b>Your Hosted Bot</b>\n\n"
+                f"Bot: @{hosted_bot.get('bot_username', 'unknown')}\n"
+                f"Status: {status_emoji} {hosted_bot['status'].upper()}\n\n"
+                f"Choose an action:"
+            )
+
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    if query:
+        try:
+            await query.edit_message_text(text, parse_mode="HTML", reply_markup=reply_markup)
+        except Exception:
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text=text, parse_mode="HTML", reply_markup=reply_markup,
+            )
+    else:
+        await update.message.reply_text(text, parse_mode="HTML", reply_markup=reply_markup)
 
     return HOST_LIST
 
 
 # ═══════════════════════════════════════════════
-#  HOST NEW BOT FLOW
+#  HOSTING MENU ROUTER
+# ═══════════════════════════════════════════════
+
+async def hosting_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Route hosting menu button clicks."""
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+
+    if data == "hst_new":
+        return await host_start(update, context)
+    elif data == "hst_list":
+        return await show_hosted_bots(update, context)
+    elif data == "hst_my_status":
+        return await my_bot_status(update, context)
+    elif data == "hst_my_delete":
+        return await delete_my_bot_prompt(update, context)
+    elif data == "hst_menu":
+        return await hosting_menu(update, context)
+    elif data == "adm_back" or data == "admin_menu":
+        # Go back to admin menu
+        from handlers.admin import _show_admin_menu
+        return await _show_admin_menu(update, context)
+
+    return await hosting_menu(update, context)
+
+
+# ═══════════════════════════════════════════════
+#  HOST NEW BOT
 # ═══════════════════════════════════════════════
 
 async def host_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Step 1: Ask for bot token."""
-    text = (
-        "🤖 <b>Host New Bot</b>\n\n"
-        "📝 Send the Bot API Token (from @BotFather):\n\n"
-        "<i>Send /cancel to abort</i>"
+    """Start the hosting flow — check limits first."""
+    query = update.callback_query
+    user_id = update.effective_user.id
+
+    # Check 1-bot-per-admin limit (for non-owners)
+    if user_id != OWNER_ID:
+        main_db = get_main_db(context)
+        existing = await main_db.get_hosted_bot_by_admin(user_id)
+        if existing:
+            await query.edit_message_text(
+                "❌ <b>You already have a hosted bot!</b>\n\n"
+                f"Bot: @{existing.get('bot_username', 'unknown')}\n"
+                f"Status: {existing['status'].upper()}\n\n"
+                "Delete your current bot first before hosting a new one.",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🗑 Delete My Bot", callback_data="hst_my_delete")],
+                    [InlineKeyboardButton("🔙 Back", callback_data="hst_menu")],
+                ]),
+            )
+            return HOST_LIST
+
+    await query.edit_message_text(
+        "🤖 *Host a New Bot*\n\n"
+        "Send the bot token from @BotFather:\n\n"
+        "_Example: 123456789:ABCdefGhIjKlMnOpQrStUvWxYz_\n\n"
+        "Send /cancel to go back.",
+        parse_mode="Markdown",
     )
-    if update.callback_query:
-        await update.callback_query.edit_message_text(text, parse_mode="HTML")
-    else:
-        await update.effective_message.reply_text(text, parse_mode="HTML")
     return HOST_TOKEN
 
 
 async def host_token(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Step 2: Receive token, ask for owner user_id."""
+    """Receive and validate bot token."""
     token = update.message.text.strip()
 
-    # Basic token format validation
+    # Basic validation
     if ":" not in token or len(token) < 30:
         await update.message.reply_text(
-            "❌ Invalid token format. Telegram bot tokens look like:\n"
-            "<code>1234567890:ABCdefGHIjklMNOpqrSTUvwxYZ</code>\n\n"
+            "❌ Invalid token format. A bot token looks like:\n"
+            "`123456789:ABCdefGhIjKlMnOpQrStUvWxYz`\n\n"
             "Please send a valid token:",
-            parse_mode="HTML"
+            parse_mode="Markdown",
         )
         return HOST_TOKEN
 
     context.user_data["host_token"] = token
-    await update.message.reply_text(
-        "✅ Token received.\n\n"
-        "👤 Now send the <b>Telegram User ID</b> of the bot owner:\n\n"
-        "<i>This user will get admin access to the hosted bot</i>",
-        parse_mode="HTML"
-    )
-    return HOST_OWNER_ID
+    user_id = update.effective_user.id
+
+    if user_id == OWNER_ID:
+        # Owner can set any user as the admin
+        await update.message.reply_text(
+            "✅ Token saved.\n\n"
+            "👤 Enter the *User ID* of the person who will admin this bot:",
+            parse_mode="Markdown",
+        )
+        return HOST_OWNER_ID
+    else:
+        # Non-owner — auto-set themselves
+        context.user_data["host_owner_id"] = user_id
+        return await _show_expiry_options(update, context)
 
 
 async def host_owner_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Step 3: Receive user_id, ask for expiry."""
+    """Receive the owner user ID for the hosted bot (OWNER flow only)."""
     try:
         owner_id = int(update.message.text.strip())
     except ValueError:
-        await update.message.reply_text("❌ Invalid User ID. Send a valid numeric ID:")
+        await update.message.reply_text("❌ Invalid User ID. Send a numeric ID:")
         return HOST_OWNER_ID
 
     context.user_data["host_owner_id"] = owner_id
-    context.user_data["host_action"] = "new"
+    return await _show_expiry_options(update, context)
 
+
+async def _show_expiry_options(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Show expiry selection buttons."""
     keyboard = [
         [
             InlineKeyboardButton("1 Day", callback_data="hst_exp_1d"),
@@ -142,401 +214,320 @@ async def host_owner_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         [InlineKeyboardButton("♾ No Expiry", callback_data="hst_exp_never")],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-
     await update.message.reply_text(
-        "⏰ Select hosting duration:",
+        "⏱ *Set Bot Expiry*\n\nChoose how long this hosted bot should run:",
         reply_markup=reply_markup,
-    )
-    return HOST_EXPIRY
-
-
-# ═══════════════════════════════════════════════
-#  LIST HOSTED BOTS
-# ═══════════════════════════════════════════════
-
-async def show_hosted_bots(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Show list of all hosted bots with status."""
-    bot_manager = get_bot_manager(context)
-    if not bot_manager:
-        if update.callback_query:
-            await update.callback_query.answer("Bot Manager not available.", show_alert=True)
-        return await hosting_menu(update, context)
-
-    try:
-        bots = await bot_manager.get_all_bots()
-    except Exception as e:
-        logger.error(f"Error fetching bots: {e}")
-        if update.callback_query:
-            await update.callback_query.answer("Error fetching bots.", show_alert=True)
-        return await hosting_menu(update, context)
-
-    keyboard = []
-    for bot in bots:
-        status = bot.get("status", "active")
-        if status == "active":
-            emoji = "🟢"
-        elif status == "stopped":
-            emoji = "🔴"
-        elif status == "expired":
-            emoji = "⏰"
-        else:
-            emoji = "⚪"
-
-        bot_username = bot.get("bot_username", "unknown")
-        owner_uid = bot.get("owner_user_id", "?")
-        bot_id = bot.get("id")
-
-        btn_text = f"{emoji} @{bot_username} (owner: {owner_uid})"
-        keyboard.append([InlineKeyboardButton(btn_text, callback_data=f"hst_bot_{bot_id}")])
-
-    if not bots:
-        text = "📋 <b>Hosted Bots</b>\n\n<i>No bots hosted yet.</i>"
-    else:
-        text = f"📋 <b>Hosted Bots</b> ({len(bots)})\n\nSelect a bot to manage:"
-
-    keyboard.append([InlineKeyboardButton("🔙 Back to Hosting Menu", callback_data="hst_menu")])
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
-    if update.callback_query:
-        await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode="HTML")
-    return HOST_LIST
-
-
-# ═══════════════════════════════════════════════
-#  BOT ACTIONS
-# ═══════════════════════════════════════════════
-
-async def bot_action_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, bot_id: str = None) -> int:
-    """Show bot details + action buttons."""
-    if bot_id is None:
-        query = update.callback_query
-        # Data format: hst_bot_{bot_id}
-        bot_id = query.data.replace("hst_bot_", "")
-
-    context.user_data["selected_bot_id"] = bot_id
-    bot_manager = get_bot_manager(context)
-
-    try:
-        bot = await bot_manager.get_bot_info(bot_id)
-        if not bot:
-            if update.callback_query:
-                await update.callback_query.answer("Bot not found.", show_alert=True)
-            return await show_hosted_bots(update, context)
-    except Exception as e:
-        logger.error(f"Error getting bot info: {e}")
-        if update.callback_query:
-            await update.callback_query.answer("Error fetching bot details.", show_alert=True)
-        return await show_hosted_bots(update, context)
-
-    status = bot.get("status", "active")
-    is_running = bot_id in bot_manager.bots
-
-    keyboard = []
-    if status == "active" and is_running:
-        keyboard.append([InlineKeyboardButton("⏸️ Stop Bot", callback_data="hst_stop")])
-    elif status in ("stopped", "expired"):
-        keyboard.append([InlineKeyboardButton("▶️ Resume Bot", callback_data="hst_resume")])
-
-    keyboard.extend([
-        [InlineKeyboardButton("⏰ Set Expiry", callback_data="hst_setexp")],
-        [InlineKeyboardButton("📊 View Stats", callback_data="hst_stats")],
-        [InlineKeyboardButton("🗑️ Delete Bot", callback_data="hst_delete")],
-        [InlineKeyboardButton("🔙 Back to List", callback_data="hst_bk_list")],
-    ])
-
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
-    bot_username = bot.get("bot_username", "Unknown")
-    owner_uid = bot.get("owner_user_id", "Unknown")
-    expires_at = bot.get("expires_at", "")
-    created_at = bot.get("created_at", "?")
-
-    # Status emoji
-    status_emoji = "🟢" if status == "active" else "🔴" if status == "stopped" else "⏰"
-
-    text = (
-        f"🤖 <b>Bot Details</b>\n\n"
-        f"📛 Username: @{bot_username}\n"
-        f"🆔 Bot ID: <code>{bot_id}</code>\n"
-        f"👤 Owner: <code>{owner_uid}</code>\n"
-        f"📊 Status: {status_emoji} {status.upper()}\n"
-        f"📅 Created: {created_at[:16] if created_at else '?'}\n"
-        f"⏰ Expiry: {expires_at[:16] if expires_at else 'Never'}"
-    )
-
-    if update.callback_query:
-        await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode="HTML")
-    else:
-        await update.effective_message.reply_text(text, reply_markup=reply_markup, parse_mode="HTML")
-
-    return HOST_ACTION
-
-
-async def bot_action_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Route action button clicks."""
-    query = update.callback_query
-    await query.answer()
-
-    if query.data == "hst_bk_list":
-        return await show_hosted_bots(update, context)
-    elif query.data == "hst_stop":
-        return await bot_stop_action(update, context)
-    elif query.data == "hst_resume":
-        return await bot_resume_action(update, context)
-    elif query.data == "hst_setexp":
-        return await bot_set_expiry(update, context)
-    elif query.data == "hst_stats":
-        return await bot_view_stats(update, context)
-    elif query.data == "hst_delete":
-        return await bot_delete_confirm(update, context)
-    elif query.data == "hst_bk_bot":
-        bot_id = context.user_data.get("selected_bot_id")
-        return await bot_action_menu(update, context, bot_id)
-
-    return HOST_ACTION
-
-
-async def bot_stop_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Stop the selected bot."""
-    bot_id = context.user_data.get("selected_bot_id")
-    bot_manager = get_bot_manager(context)
-
-    try:
-        await bot_manager.stop_bot(bot_id)
-        await update.callback_query.answer("✅ Bot stopped successfully.", show_alert=True)
-    except Exception as e:
-        logger.error(f"Error stopping bot {bot_id}: {e}")
-        await update.callback_query.answer(f"❌ Error: {e}", show_alert=True)
-
-    return await bot_action_menu(update, context, bot_id)
-
-
-async def bot_resume_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Resume the selected bot."""
-    bot_id = context.user_data.get("selected_bot_id")
-    bot_manager = get_bot_manager(context)
-
-    try:
-        await bot_manager.resume_bot(bot_id)
-        await update.callback_query.answer("✅ Bot resumed successfully.", show_alert=True)
-    except Exception as e:
-        logger.error(f"Error resuming bot {bot_id}: {e}")
-        await update.callback_query.answer(f"❌ Error: {e}", show_alert=True)
-
-    return await bot_action_menu(update, context, bot_id)
-
-
-# ═══════════════════════════════════════════════
-#  DELETE BOT
-# ═══════════════════════════════════════════════
-
-async def bot_delete_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Ask confirmation for deletion."""
-    keyboard = [
-        [
-            InlineKeyboardButton("❌ Cancel", callback_data="hst_del_no"),
-            InlineKeyboardButton("✅ Yes, Delete", callback_data="hst_del_yes"),
-        ]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    text = (
-        "⚠️ <b>DANGER ZONE</b> ⚠️\n\n"
-        "Are you sure you want to <b>DELETE</b> this bot?\n\n"
-        "🗑 ALL bot data (products, users, orders, settings) will be permanently erased.\n\n"
-        "⚠️ <b>This action cannot be undone!</b>"
-    )
-
-    await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode="HTML")
-    return HOST_CONFIRM
-
-
-async def bot_delete_execute(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Execute deletion or cancel."""
-    query = update.callback_query
-    await query.answer()
-
-    bot_id = context.user_data.get("selected_bot_id")
-
-    if query.data == "hst_del_no":
-        return await bot_action_menu(update, context, bot_id)
-
-    # Execute deletion
-    bot_manager = get_bot_manager(context)
-
-    try:
-        await bot_manager.delete_bot(bot_id)
-        text = "✅ Bot deleted successfully.\n\n🗑 All data has been removed."
-    except Exception as e:
-        logger.error(f"Error deleting bot {bot_id}: {e}")
-        text = f"❌ Error deleting bot: {e}"
-
-    keyboard = [[InlineKeyboardButton("🔙 Back to Hosted Bots", callback_data="hst_list")]]
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
-    return HOST_LIST
-
-
-# ═══════════════════════════════════════════════
-#  SET EXPIRY
-# ═══════════════════════════════════════════════
-
-async def bot_set_expiry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Show expiry options for editing."""
-    context.user_data["host_action"] = "edit"
-
-    keyboard = [
-        [
-            InlineKeyboardButton("1 Day", callback_data="hst_exp_1d"),
-            InlineKeyboardButton("1 Week", callback_data="hst_exp_1w"),
-        ],
-        [
-            InlineKeyboardButton("1 Month", callback_data="hst_exp_1m"),
-            InlineKeyboardButton("3 Months", callback_data="hst_exp_3m"),
-        ],
-        [InlineKeyboardButton("♾ No Expiry", callback_data="hst_exp_never")],
-        [InlineKeyboardButton("🔙 Cancel", callback_data="hst_exp_cancel")],
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
-    await update.callback_query.edit_message_text(
-        "⏰ Select new expiry duration:", reply_markup=reply_markup
+        parse_mode="Markdown",
     )
     return HOST_EXPIRY
 
 
 async def bot_expiry_selected(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Handle expiry selection — for both new bot and edit bot flows."""
+    """Handle expiry selection and actually host the bot."""
     query = update.callback_query
     await query.answer()
 
-    if query.data == "hst_exp_cancel":
-        bot_id = context.user_data.get("selected_bot_id")
-        return await bot_action_menu(update, context, bot_id)
-
-    # Calculate expiry datetime
+    expiry_choice = query.data.replace("hst_exp_", "")
     now = datetime.utcnow()
-    expires_at = ""
 
-    if query.data == "hst_exp_1d":
-        expires_at = (now + timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S")
-    elif query.data == "hst_exp_1w":
-        expires_at = (now + timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S")
-    elif query.data == "hst_exp_1m":
-        expires_at = (now + timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S")
-    elif query.data == "hst_exp_3m":
-        expires_at = (now + timedelta(days=90)).strftime("%Y-%m-%d %H:%M:%S")
-    elif query.data == "hst_exp_never":
-        expires_at = ""
+    expiry_map = {
+        "1d": now + timedelta(days=1),
+        "1w": now + timedelta(weeks=1),
+        "1m": now + timedelta(days=30),
+        "3m": now + timedelta(days=90),
+        "never": None,
+    }
 
-    action = context.user_data.get("host_action")
+    expires_at = expiry_map.get(expiry_choice)
+    expires_str = expires_at.strftime("%Y-%m-%d %H:%M:%S") if expires_at else ""
+
+    token = context.user_data.get("host_token")
+    owner_user_id = context.user_data.get("host_owner_id", 0)
+
+    if not token:
+        await query.edit_message_text("❌ Something went wrong. Please try again.")
+        return ADMIN_MENU
+
     bot_manager = get_bot_manager(context)
+    if not bot_manager:
+        await query.edit_message_text("❌ Bot Manager not available. Please restart the main bot.")
+        return ADMIN_MENU
 
-    if action == "new":
-        # ── HOST NEW BOT ──
-        token = context.user_data.get("host_token")
-        owner_id = context.user_data.get("host_owner_id")
+    await query.edit_message_text("⏳ <b>Setting up your Bot...</b>\n\n1. Validating token\n2. Syncing media files\n\nYou'll receive a message when it's ready!", parse_mode="HTML")
 
+    # Clean up user_data
+    context.user_data.pop("host_token", None)
+    context.user_data.pop("host_owner_id", None)
+
+    # Run hosting in background so owner's buttons don't freeze
+    chat_id = query.message.chat_id
+    bot_obj = context.bot
+    
+    async def _host_in_background():
         try:
-            await query.edit_message_text("⏳ Setting up new bot... Please wait.")
-            bot_record = await bot_manager.host_bot(token, owner_id, expires_at)
-            bot_username = bot_record.get("bot_username", "unknown")
+            bot_record = await bot_manager.host_bot(token, owner_user_id, expires_str)
+            expiry_text = expires_at.strftime("%Y-%m-%d %H:%M") if expires_at else "Never"
 
-            text = (
-                f"✅ <b>Bot Hosted Successfully!</b>\n\n"
-                f"🤖 @{bot_username}\n"
-                f"👤 Owner: <code>{owner_id}</code>\n"
-                f"⏰ Expiry: {expires_at[:16] if expires_at else 'Never'}\n\n"
-                f"The bot is now live and accepting commands!"
+            # Show success message with deep-link to start the hosted bot
+            start_keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton(
+                    f"▶️ Start @{bot_record['bot_username']}",
+                    url=f"https://t.me/{bot_record['bot_username']}?start=setup",
+                )],
+            ])
+
+            await bot_obj.send_message(
+                chat_id=chat_id,
+                text=(
+                    f"✅ <b>Bot Hosted Successfully!</b>\n\n"
+                    f"🤖 Bot: @{bot_record['bot_username']}\n"
+                    f"🆔 Bot ID: <code>{bot_record['id']}</code>\n"
+                    f"👤 Admin: <code>{owner_user_id}</code>\n"
+                    f"⏱ Expires: {expiry_text}\n\n"
+                    f"⚠️ <b>IMPORTANT:</b> Please click the button below to /start the hosted bot first!\n"
+                    f"Media sync will begin after you start it."
+                ),
+                parse_mode="HTML",
+                reply_markup=start_keyboard,
             )
+        except ValueError as e:
+            await bot_obj.send_message(chat_id=chat_id, text=f"❌ Failed to host bot:\n\n{str(e)}")
         except Exception as e:
-            logger.error(f"Error hosting new bot: {e}")
-            text = f"❌ <b>Failed to host bot</b>\n\n{e}"
+            logger.error(f"Failed to host bot: {e}", exc_info=True)
+            await bot_obj.send_message(chat_id=chat_id, text=f"❌ Error:\n\n{str(e)}")
 
-        keyboard = [[InlineKeyboardButton("🔙 Back to Hosting Menu", callback_data="hst_menu")]]
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    asyncio.create_task(_host_in_background())
 
-        # Clean up user_data
-        context.user_data.pop("host_token", None)
-        context.user_data.pop("host_owner_id", None)
-        context.user_data.pop("host_action", None)
+    from handlers.admin import _show_admin_menu
+    return await _show_admin_menu(update, context)
+
+
+# ═══════════════════════════════════════════════
+#  LIST HOSTED BOTS (Owner)
+# ═══════════════════════════════════════════════
+
+async def show_hosted_bots(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Show list of all hosted bots."""
+    query = update.callback_query
+    bot_manager = get_bot_manager(context)
+    if not bot_manager:
+        await query.edit_message_text("❌ Bot Manager not available.")
+        return ADMIN_MENU
+
+    bots = await bot_manager.get_all_bots()
+
+    if not bots:
+        keyboard = [[InlineKeyboardButton("🔙 Back", callback_data="hst_menu")]]
+        await query.edit_message_text(
+            "📋 *Hosted Bots*\n\nNo bots hosted yet.",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown",
+        )
         return HOST_LIST
 
-    elif action == "edit":
-        # ── EDIT EXPIRY ──
-        bot_id = context.user_data.get("selected_bot_id")
-        try:
-            await bot_manager.set_expiry(bot_id, expires_at)
-            await query.answer(
-                f"✅ Expiry updated to: {expires_at[:16] if expires_at else 'Never'}",
-                show_alert=True,
-            )
-        except Exception as e:
-            logger.error(f"Error updating expiry: {e}")
-            await query.answer(f"❌ Error: {e}", show_alert=True)
+    text = "📋 <b>Hosted Bots</b>\n\n"
+    keyboard = []
 
-        context.user_data.pop("host_action", None)
-        return await bot_action_menu(update, context, bot_id)
+    status_emojis = {
+        "active": "🟢", "stopped": "🔴",
+        "expired": "⏰", "deleted": "🗑",
+    }
 
-    return HOST_LIST
+    for bot in bots:
+        emoji = status_emojis.get(bot["status"], "❓")
+        text += f'{emoji} @{bot.get("bot_username", "?")} — {bot["status"].upper()}\n'
+        if bot["status"] in ("active", "stopped"):
+            keyboard.append([InlineKeyboardButton(
+                f'{emoji} @{bot.get("bot_username", bot["id"])}',
+                callback_data=f"hst_bot_{bot['id']}",
+            )])
 
-
-# ═══════════════════════════════════════════════
-#  VIEW STATS
-# ═══════════════════════════════════════════════
-
-async def bot_view_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Show stats for the selected hosted bot."""
-    bot_id = context.user_data.get("selected_bot_id")
-    bot_manager = get_bot_manager(context)
-
-    try:
-        stats = await bot_manager.get_bot_stats(bot_id)
-
-        if not stats:
-            text = "📊 <b>Bot Stats</b>\n\n<i>No data available.</i>"
-        else:
-            text = (
-                f"📊 <b>Bot Stats</b>\n\n"
-                f"👥 Users: <b>{stats.get('total_users', 0)}</b>\n"
-                f"📦 Orders: <b>{stats.get('total_orders', 0)}</b>\n"
-                f"✅ Approved: <b>{stats.get('approved_orders', 0)}</b>\n"
-                f"⏳ Pending: <b>{stats.get('pending_orders', 0)}</b>\n"
-                f"❌ Rejected: <b>{stats.get('rejected_orders', 0)}</b>\n"
-                f"💰 Revenue: <b>₹{stats.get('total_revenue', 0)}</b>"
-            )
-    except Exception as e:
-        logger.error(f"Error fetching stats for {bot_id}: {e}")
-        text = f"❌ Error fetching stats: {e}"
-
-    keyboard = [[InlineKeyboardButton("🔙 Back", callback_data="hst_bk_bot")]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
-    await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode="HTML")
+    keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="hst_menu")])
+    await query.edit_message_text(
+        text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML",
+    )
     return HOST_ACTION
 
 
+async def bot_action_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handle actions on a specific hosted bot."""
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+
+    if data == "hst_menu":
+        return await hosting_menu(update, context)
+
+    bot_manager = get_bot_manager(context)
+    if not bot_manager:
+        return HOST_LIST
+
+    if data.startswith("hst_bot_"):
+        bot_id = data.replace("hst_bot_", "")
+        context.user_data["selected_bot_id"] = bot_id
+        bot_info = await bot_manager.get_bot_info(bot_id)
+
+        if not bot_info:
+            await query.answer("❌ Bot not found.", show_alert=True)
+            return await show_hosted_bots(update, context)
+
+        is_running = bot_id in bot_manager.bots
+
+        text = (
+            f"🤖 <b>Bot: @{bot_info.get('bot_username', '?')}</b>\n\n"
+            f"🆔 ID: <code>{bot_id}</code>\n"
+            f"👤 Admin: <code>{bot_info['owner_user_id']}</code>\n"
+            f"📊 Status: {bot_info['status'].upper()}\n"
+            f"🕐 Created: {bot_info.get('created_at', '?')}\n"
+            f"⏱ Expires: {bot_info.get('expires_at') or 'Never'}\n"
+            f"🔄 Running: {'✅' if is_running else '❌'}"
+        )
+
+        keyboard = []
+        if is_running:
+            keyboard.append([InlineKeyboardButton("⏸ Stop Bot", callback_data=f"hst_stop_{bot_id}")])
+        else:
+            keyboard.append([InlineKeyboardButton("▶️ Resume Bot", callback_data=f"hst_resume_{bot_id}")])
+        keyboard.append([InlineKeyboardButton("🗑 Delete Bot", callback_data=f"hst_del_ask_{bot_id}")])
+        keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="hst_list")])
+
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+        return HOST_ACTION
+
+    elif data.startswith("hst_stop_"):
+        bot_id = data.replace("hst_stop_", "")
+        try:
+            await bot_manager.stop_bot(bot_id, reason="manual")
+            await query.answer("✅ Bot stopped!", show_alert=True)
+        except Exception as e:
+            await query.answer(f"❌ Error: {e}", show_alert=True)
+        return await show_hosted_bots(update, context)
+
+    elif data.startswith("hst_resume_"):
+        bot_id = data.replace("hst_resume_", "")
+        try:
+            await bot_manager.resume_bot(bot_id)
+            await query.answer("✅ Bot resumed!", show_alert=True)
+        except Exception as e:
+            await query.answer(f"❌ Error: {e}", show_alert=True)
+        return await show_hosted_bots(update, context)
+
+    elif data.startswith("hst_del_ask_"):
+        bot_id = data.replace("hst_del_ask_", "")
+        keyboard = [
+            [
+                InlineKeyboardButton("✅ Yes, Delete", callback_data=f"hst_del_yes_{bot_id}"),
+                InlineKeyboardButton("❌ Cancel", callback_data="hst_list"),
+            ]
+        ]
+        await query.edit_message_text(
+            f"⚠️ *Delete Bot*\n\nAre you sure you want to delete bot `{bot_id}`?\n\n"
+            "This will remove ALL data (users, orders, overrides)!",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown",
+        )
+        return HOST_CONFIRM
+
+    elif data == "hst_list":
+        return await show_hosted_bots(update, context)
+
+    return await hosting_menu(update, context)
+
+
+async def bot_delete_execute(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Execute bot deletion after confirmation."""
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+
+    if data.startswith("hst_del_yes_"):
+        bot_id = data.replace("hst_del_yes_", "")
+        bot_manager = get_bot_manager(context)
+        if bot_manager:
+            try:
+                await bot_manager.delete_bot(bot_id)
+                await query.answer(f"✅ Bot {bot_id} deleted successfully!", show_alert=True)
+            except Exception as e:
+                await query.answer(f"❌ Error deleting bot: {e}", show_alert=True)
+    else:
+        if data == "hst_menu":
+            return await hosting_menu(update, context)
+        return await show_hosted_bots(update, context)
+
+    from handlers.admin import _show_admin_menu
+    return await _show_admin_menu(update, context)
+
+
 # ═══════════════════════════════════════════════
-#  GET STATES (for admin.py integration)
+#  ADMIN SELF-SERVICE
+# ═══════════════════════════════════════════════
+
+async def my_bot_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Show admin's own hosted bot status."""
+    query = update.callback_query
+    main_db = get_main_db(context)
+    user_id = update.effective_user.id
+
+    hosted = await main_db.get_hosted_bot_by_admin(user_id)
+    if not hosted:
+        await query.answer("❌ You don't have a hosted bot.", show_alert=True)
+        return await hosting_menu(update, context)
+
+    bot_manager = get_bot_manager(context)
+    is_running = bot_manager and hosted["id"] in bot_manager.bots
+
+    text = (
+        f"🤖 <b>Your Bot: @{hosted.get('bot_username', '?')}</b>\n\n"
+        f"📊 Status: {hosted['status'].upper()}\n"
+        f"🔄 Running: {'✅' if is_running else '❌'}\n"
+        f"🕐 Created: {hosted.get('created_at', '?')}\n"
+        f"⏱ Expires: {hosted.get('expires_at') or 'Never'}"
+    )
+
+    keyboard = [[InlineKeyboardButton("🔙 Back", callback_data="hst_menu")]]
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    return HOST_LIST
+
+
+async def delete_my_bot_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Ask admin to confirm deleting their own hosted bot."""
+    query = update.callback_query
+    main_db = get_main_db(context)
+    user_id = update.effective_user.id
+
+    hosted = await main_db.get_hosted_bot_by_admin(user_id)
+    if not hosted:
+        await query.answer("❌ You don't have a hosted bot.", show_alert=True)
+        return await hosting_menu(update, context)
+
+    keyboard = [
+        [
+            InlineKeyboardButton("✅ Yes, Delete", callback_data=f"hst_del_yes_{hosted['id']}"),
+            InlineKeyboardButton("❌ Cancel", callback_data="hst_menu"),
+        ]
+    ]
+    await query.edit_message_text(
+        f"⚠️ <b>Delete Your Hosted Bot</b>\n\n"
+        f"Bot: @{hosted.get('bot_username', '?')}\n\n"
+        "This will remove ALL data associated with your bot!\n\n"
+        "Are you sure?",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="HTML",
+    )
+    return HOST_CONFIRM
+
+
+# ═══════════════════════════════════════════════
+#  STATE EXPORTS (merged into admin ConversationHandler)
 # ═══════════════════════════════════════════════
 
 def get_hosting_states():
-    """Return a dict of state -> handlers to be merged into admin ConversationHandler."""
+    """Return hosting-related states for merging into admin ConversationHandler."""
     return {
-        HOST_LIST: [
-            CallbackQueryHandler(hosting_menu_handler, pattern=r"^hst_"),
-        ],
-        HOST_TOKEN: [
-            MessageHandler(filters.TEXT & ~filters.COMMAND, host_token),
-        ],
-        HOST_OWNER_ID: [
-            MessageHandler(filters.TEXT & ~filters.COMMAND, host_owner_id),
-        ],
-        HOST_EXPIRY: [
-            CallbackQueryHandler(bot_expiry_selected, pattern=r"^hst_exp_"),
-        ],
-        HOST_ACTION: [
-            CallbackQueryHandler(bot_action_handler, pattern=r"^hst_"),
-        ],
-        HOST_CONFIRM: [
-            CallbackQueryHandler(bot_delete_execute, pattern=r"^hst_del_"),
-        ],
+        HOST_TOKEN: [MessageHandler(filters.TEXT & ~filters.COMMAND, host_token)],
+        HOST_OWNER_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, host_owner_id)],
+        HOST_EXPIRY: [CallbackQueryHandler(bot_expiry_selected, pattern=r"^hst_exp_")],
+        HOST_LIST: [CallbackQueryHandler(hosting_menu_handler, pattern=r"^hst_|^adm_back$|^admin_menu$")],
+        HOST_ACTION: [CallbackQueryHandler(bot_action_handler, pattern=r"^hst_")],
+        HOST_CONFIRM: [CallbackQueryHandler(bot_delete_execute, pattern=r"^hst_")],
     }

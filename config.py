@@ -1,7 +1,7 @@
 """
-VIP Access Bot — Configuration
+Host Bot — Configuration
 Loads environment variables for bot operation.
-Single-owner system with multi-bot hosting support.
+Single-owner system with mirror-based multi-bot hosting.
 """
 import os
 
@@ -20,7 +20,7 @@ TURSO_URL = os.getenv("TURSO_URL", "")
 TURSO_AUTH_TOKEN = os.getenv("TURSO_AUTH_TOKEN", "")
 
 # ── Owner (Single main owner with full hosting control) ──
-OWNER_ID = int(os.getenv("OWNER_ID", os.getenv("OWNER_1", "0")))
+OWNER_ID = int(os.getenv("OWNER_ID", "0"))
 
 # ── Payment ──
 UPI_ID = os.getenv("UPI_ID", "")
@@ -29,4 +29,4 @@ UPI_ID = os.getenv("UPI_ID", "")
 PORT = int(os.getenv("PORT", "10000"))
 
 # ── Bot Info ──
-BOT_NAME = "VIP Access Bot"
+BOT_NAME = "Host Bot"

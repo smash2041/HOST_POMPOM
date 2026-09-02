@@ -1,8 +1,8 @@
 """
-VIP Access Bot — Main Entry Point
+Host Bot — Main Entry Point
 Starts Telegram bot (polling) + aiohttp web server concurrently.
-Supports multi-bot hosting via BotManager.
-Optimized for AWS EC2 deployment.
+Mirror-based multi-bot hosting system.
+Optimized for Render + UptimeRobot deployment.
 """
 import re
 import asyncio
@@ -16,13 +16,13 @@ from telegram.ext import (
     MessageHandler,
     filters,
 )
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from config import BOT_TOKEN, PORT, OWNER_ID
 from database import db
 from web_server import create_web_app
 from utils.bot_helpers import get_owner_ids
 from handlers.start import (
-    start_command,
     product_callback,
     back_to_products_callback,
     show_proof_callback,
@@ -55,7 +55,6 @@ async def handle_message(update, context):
     """
     Global message handler (lowest priority).
     Routes payment proof, issue reporting, and owner replies.
-    Uses dynamic owner_ids from context.bot_data.
     """
     if not update.message:
         return
@@ -67,7 +66,6 @@ async def handle_message(update, context):
         reply_msg = update.message.reply_to_message
         if reply_msg.text and "ID:" in reply_msg.text:
             try:
-                # Extract ID using regex to avoid markdown bracket parsing issues
                 match = re.search(r"ID:\s*(\d+)", reply_msg.text)
                 if match:
                     user_id = int(match.group(1))
@@ -83,12 +81,9 @@ async def handle_message(update, context):
 
     # Check if user is reporting an issue
     if context.user_data.get("awaiting_issue"):
-        # Forward issue to owners
         for owner_id in owner_ids:
             try:
-                # Forward the exact message
                 await update.message.forward(chat_id=owner_id)
-                # Send context message with user ID
                 username = f"@{update.effective_user.username}" if update.effective_user.username else "No Username"
                 await context.bot.send_message(
                     chat_id=owner_id,
@@ -97,7 +92,7 @@ async def handle_message(update, context):
                 )
             except Exception as e:
                 logger.warning(f"Failed to forward issue to owner {owner_id}: {e}")
-        
+
         context.user_data.pop("awaiting_issue", None)
         await update.message.reply_text("✅ Your issue has been sent to the support team. We will reply soon.")
         return
@@ -124,13 +119,85 @@ async def error_handler(update, context):
 
 
 # ═══════════════════════════════════════════════
+#  MAIN BOT /start (hosting bot — not a store)
+# ═══════════════════════════════════════════════
+
+async def main_start_command(update, context):
+    """
+    /start on the main bot — shows hosting info, not store products.
+    Normal users: welcome only.
+    Hosting admins: 'Host Bot' / 'Delete Bot' buttons.
+    Owner: admin panel link.
+    """
+    user = update.effective_user
+    user_id = user.id
+
+    # Check if user is owner
+    if user_id == OWNER_ID:
+        text = (
+            "👑 *Host Bot — Owner Panel*\n\n"
+            "Welcome, Owner! Use /admin to manage:\n"
+            "• Products & Settings (mirrored to all hosted bots)\n"
+            "• Hosting Admins\n"
+            "• Hosted Bots\n\n"
+            "Use /admin to open the control panel."
+        )
+        await update.message.reply_text(text, parse_mode="Markdown")
+        return
+
+    # Check if user is a hosting admin
+    main_db = db
+    is_admin = await main_db.is_hosting_admin(user_id)
+    if is_admin:
+        existing = await main_db.get_hosted_bot_by_admin(user_id)
+        if existing:
+            status_emoji = "🟢" if existing["status"] == "active" else "🔴"
+            text = (
+                f"🤖 <b>Your Hosted Bot</b>\n\n"
+                f"Bot: @{existing.get('bot_username', 'unknown')}\n"
+                f"Status: {status_emoji} {existing['status'].upper()}\n\n"
+                f"Use /admin to manage settings or delete your bot."
+            )
+            keyboard = [
+                [InlineKeyboardButton("🛠 Manage Bot", url=f"https://t.me/{existing.get('bot_username', '')}")]
+                if existing.get("bot_username") else [],
+            ]
+            keyboard = [row for row in keyboard if row]  # Remove empty rows
+        else:
+            text = (
+                "🤖 <b>Host Your Own Bot</b>\n\n"
+                "You have hosting access!\n"
+                "Use /admin to start hosting your bot.\n\n"
+                "📌 <b>Steps:</b>\n"
+                "1. Go to @BotFather and create a new bot\n"
+                "2. Copy the bot token\n"
+                "3. Use /admin → Host a Bot\n"
+                "4. Enter your bot token &amp; user ID\n"
+                "5. Your bot will be live with mirrored menu!\n\n"
+                "⚠️ You can host 1 bot at a time."
+            )
+            keyboard = []
+        reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
+        await update.message.reply_text(text, reply_markup=reply_markup, parse_mode="HTML")
+        return
+
+    # Regular user — just welcome, no hosting options
+    await update.message.reply_text(
+        "👋 *Welcome to Host Bot!*\n\n"
+        "This is a bot hosting service.\n"
+        "Contact the owner for hosting access.",
+        parse_mode="Markdown"
+    )
+
+
+# ═══════════════════════════════════════════════
 #  MAIN
 # ═══════════════════════════════════════════════
 
 async def main():
     """Main entry point — starts bot polling + web server + hosted bots."""
     logger.info("=" * 50)
-    logger.info("Starting VIP Access Bot...")
+    logger.info("Starting Host Bot...")
     logger.info("=" * 50)
 
     # ── 1. Initialize Database ──
@@ -142,17 +209,18 @@ async def main():
 
     # Set bot_data for multi-bot system
     app.bot_data["db"] = db
+    app.bot_data["main_db"] = db
     app.bot_data["owner_ids"] = {OWNER_ID} - {0}
     app.bot_data["is_main_bot"] = True
-    app.bot_data["main_db"] = db
+    app.bot_data["bot_id"] = ""
 
     # Admin conversation handler (highest priority — group 0)
     app.add_handler(get_admin_conversation_handler(), group=0)
 
-    # Command handlers (group 1)
-    app.add_handler(CommandHandler("start", start_command), group=1)
+    # Command handlers (group 1) — main bot uses its own /start
+    app.add_handler(CommandHandler("start", main_start_command), group=1)
 
-    # Callback query handlers (group 1)
+    # Callback query handlers (group 1) — for hosted bot mirroring test
     app.add_handler(
         CallbackQueryHandler(product_callback, pattern=r"^product_\d+$"),
         group=1,
@@ -216,7 +284,7 @@ async def main():
 
     # ── 4. Initialize BotManager & Load Hosted Bots ──
     from bot_manager import BotManager
-    bot_manager = BotManager(db, OWNER_ID)
+    bot_manager = BotManager(db, OWNER_ID, main_application=app)
     app.bot_data["bot_manager"] = bot_manager
 
     await bot_manager.load_all_bots()
@@ -235,7 +303,7 @@ async def main():
     logger.info(f"✅ Web server started on 0.0.0.0:{PORT}")
 
     logger.info("=" * 50)
-    logger.info("🚀 VIP Access Bot is fully operational!")
+    logger.info("🚀 Host Bot is fully operational!")
     logger.info("=" * 50)
 
     # ── Keep running until interrupted ──
@@ -252,9 +320,7 @@ async def main():
             await expiry_task
         except asyncio.CancelledError:
             pass
-        # Shutdown all hosted bots
         await bot_manager.shutdown_all()
-        # Shutdown main bot
         await app.updater.stop()
         await app.stop()
         await app.shutdown()

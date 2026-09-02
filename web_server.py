@@ -1,7 +1,6 @@
 """
-VIP Access Bot — Web Server
-aiohttp server for health checks and monitoring.
-Simplified for AWS EC2 deployment (no Render keep-alive needed).
+Host Bot — Web Server
+aiohttp server for health checks and UptimeRobot monitoring.
 """
 import time
 from aiohttp import web
@@ -16,7 +15,7 @@ async def handle_root(request):
     minutes, seconds = divmod(remainder, 60)
     return web.Response(
         text=(
-            f"🤖 VIP Access Bot is alive!\n"
+            f"🤖 Host Bot is alive!\n"
             f"⏱ Uptime: {hours}h {minutes}m {seconds}s"
         ),
         content_type="text/plain",
@@ -24,7 +23,7 @@ async def handle_root(request):
 
 
 async def handle_ping(request):
-    """Ping endpoint — for monitoring services."""
+    """Ping endpoint — for UptimeRobot / monitoring services."""
     return web.json_response(
         {"status": "ok", "uptime": int(time.time() - start_time)}
     )
@@ -36,7 +35,7 @@ async def handle_health(request):
         {
             "status": "healthy",
             "uptime": int(time.time() - start_time),
-            "service": "VIP Access Bot",
+            "service": "Host Bot",
         }
     )
 
@@ -44,15 +43,15 @@ async def handle_health(request):
 def create_web_app():
     """Create and return the aiohttp web application."""
     app = web.Application()
-    
+
     # Add GET handlers
     app.router.add_get("/", handle_root)
     app.router.add_get("/ping", handle_ping)
     app.router.add_get("/health", handle_health)
-    
+
     # Add HEAD handlers for monitoring compatibility
     app.router.add_head("/", handle_root)
     app.router.add_head("/ping", handle_ping)
     app.router.add_head("/health", handle_health)
-    
+
     return app

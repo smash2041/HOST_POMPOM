@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: vip-access-bot
+    name: host-bot
     runtime: python
     plan: free
     buildCommand: pip install -r requirements.txt
@@ -12,9 +12,7 @@ services:
         sync: false
       - key: TURSO_AUTH_TOKEN
         sync: false
-      - key: OWNER_1
-        sync: false
-      - key: OWNER_2
+      - key: OWNER_ID
         sync: false
       - key: UPI_ID
         sync: false

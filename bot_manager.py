@@ -1,22 +1,28 @@
 """
-VIP Access Bot — Bot Manager
+Host Bot — Bot Manager
 Manages multiple hosted bot instances running in the same process.
-Each hosted bot gets its own database partition (table prefix).
+Each hosted bot mirrors the main bot's products/settings.
+Per-bot DB only for users/orders. Overrides for UPI/QR.
 """
 import re
 import logging
 import asyncio
-import hashlib
+import time
+import json
+from urllib.error import URLError
 from datetime import datetime
+import hashlib
 
-import httpx
+from telegram import Update
 from telegram.ext import (
     Application, MessageHandler, CallbackQueryHandler,
     CommandHandler, filters
 )
 
-from database import Database
-from handlers.admin import get_admin_conversation_handler
+import httpx
+
+from utils.media_clone import get_translated_file_id
+from database import Database, _row_to_hosted_bot, HOSTED_BOT_COLS
 from handlers.start import (
     start_command, product_callback, back_to_products_callback,
     show_proof_callback, how_to_use_callback, report_issue_callback,
@@ -29,17 +35,6 @@ from handlers.payment import (
 from utils.bot_helpers import get_owner_ids
 
 logger = logging.getLogger(__name__)
-
-# Column names for hosted_bots table
-HOSTED_BOT_COLS = [
-    "id", "bot_token", "bot_username", "owner_user_id", "table_prefix",
-    "status", "created_at", "expires_at", "stopped_at", "stopped_reason",
-]
-
-
-def _row_to_bot(row):
-    """Convert a hosted_bots row tuple to a dict."""
-    return dict(zip(HOSTED_BOT_COLS, row))
 
 
 # ═══════════════════════════════════════════════
@@ -104,15 +99,28 @@ async def _hosted_error_handler(update, context):
 
 
 # ═══════════════════════════════════════════════
+#  SIMPLE CONTEXT PROXY (for pre-caching)
+# ═══════════════════════════════════════════════
+
+class _SimpleContext:
+    """Lightweight context proxy for background pre-caching.
+    Mimics context.bot and context.bot_data for get_translated_file_id."""
+    def __init__(self, app):
+        self.bot = app.bot
+        self.bot_data = app.bot_data
+
+
+# ═══════════════════════════════════════════════
 #  BOT MANAGER
 # ═══════════════════════════════════════════════
 
 class BotManager:
     """Manages multiple hosted bot instances running in the same process."""
 
-    def __init__(self, main_db, main_owner_id):
+    def __init__(self, main_db, main_owner_id, main_application=None):
         self.main_db = main_db
         self.main_owner_id = main_owner_id
+        self.main_application = main_application
         self.bots = {}  # bot_id -> {"app": Application, "db": Database, "record": dict}
 
     # ──────────────── STARTUP ────────────────
@@ -128,7 +136,7 @@ class BotManager:
                 return
 
             for row in result.rows:
-                bot_record = _row_to_bot(row)
+                bot_record = _row_to_hosted_bot(row)
                 try:
                     await self._start_bot(bot_record)
                     logger.info(f"✅ Started hosted bot @{bot_record['bot_username']} ({bot_record['id']})")
@@ -143,7 +151,6 @@ class BotManager:
         """
         Host a new bot instance.
         Validates token, creates tables, starts polling.
-        Returns bot info dict on success, raises on failure.
         """
         # 1. Validate the bot token via Telegram API
         try:
@@ -193,14 +200,10 @@ class BotManager:
             "stopped_reason": "",
         }
 
-        # 6. Create Database with prefix + init tables
-        db_instance = Database(table_prefix=table_prefix)
-        await db_instance.init()
+        # 6. Start the bot (with pre-cache since it's new)
+        await self._start_bot(bot_record, is_new_bot=True)
 
-        # 7. Start the bot
-        await self._start_bot(bot_record)
-
-        # 8. Log
+        # 7. Log
         await self._log(bot_id, "created", f"Hosted bot @{bot_username} for user {owner_user_id}")
 
         logger.info(f"✅ Successfully hosted bot @{bot_username} ({bot_id})")
@@ -208,32 +211,34 @@ class BotManager:
 
     # ──────────────── START BOT INSTANCE ────────────────
 
-    async def _start_bot(self, bot_record):
-        """Create Application, register handlers, and start polling for a hosted bot."""
+    async def _start_bot(self, bot_record, is_new_bot=False):
+        """Create Application, register handlers, start polling — MIRROR setup."""
+        from handlers.admin import get_admin_conversation_handler
+
         bot_id = bot_record["id"]
         bot_token = bot_record["bot_token"]
         owner_user_id = bot_record["owner_user_id"]
         table_prefix = bot_record["table_prefix"]
 
-        # Create Database instance
+        # Create per-bot Database (only for users/orders)
         db_instance = Database(table_prefix=table_prefix)
         await db_instance.init()
 
         # Create Application
         app = Application.builder().token(bot_token).build()
 
-        # Set bot_data for multi-bot system
-        app.bot_data["db"] = db_instance
+        # MIRROR SETUP — the key architecture
+        app.bot_data["db"] = db_instance          # Per-bot DB (users/orders)
+        app.bot_data["main_db"] = self.main_db     # Main DB (products/settings/overrides)
         app.bot_data["owner_ids"] = {self.main_owner_id, owner_user_id} - {0}
         app.bot_data["is_main_bot"] = False
-        app.bot_data["main_db"] = self.main_db
+        app.bot_data["bot_id"] = bot_id            # For override lookups
         app.bot_data["bot_manager"] = self
+        app.bot_data["main_bot"] = self.main_application.bot if self.main_application else None
 
         # Register handlers (same as main bot)
-        # Group 0: Admin conversation handler
         app.add_handler(get_admin_conversation_handler(), group=0)
 
-        # Group 1: Commands and callbacks
         app.add_handler(CommandHandler("start", start_command), group=1)
         app.add_handler(CallbackQueryHandler(product_callback, pattern=r"^product_\d+$"), group=1)
         app.add_handler(CallbackQueryHandler(buy_callback, pattern=r"^buy_\d+$"), group=1)
@@ -246,14 +251,19 @@ class BotManager:
         app.add_handler(CallbackQueryHandler(approve_callback, pattern=r"^approve_\d+$"), group=1)
         app.add_handler(CallbackQueryHandler(reject_callback, pattern=r"^reject_\d+$"), group=1)
 
-        # Group 2: Global message handler
         app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, _hosted_handle_message), group=2)
-
-        # Error handler
         app.add_error_handler(_hosted_error_handler)
 
-        # Initialize and start polling
+        # Initialize
         await app.initialize()
+
+        # For NEW hosted bots: set awaiting_admin_start flag
+        # Pre-cache will happen AFTER admin /start confirms
+        if self.main_application and is_new_bot:
+            app.bot_data["awaiting_admin_start"] = True
+            app.bot_data["admin_started"] = False
+
+        # Start polling
         await app.start()
         await app.updater.start_polling(
             drop_pending_updates=True,
@@ -267,12 +277,148 @@ class BotManager:
             "record": bot_record,
         }
 
+        # For new bots: wait for admin /start, then pre-cache
+        if self.main_application and is_new_bot:
+            asyncio.create_task(self._wait_for_admin_start(bot_id, app, db_instance))
+
+    # ──────────────── WAIT FOR ADMIN /START ────────────────
+
+    async def _wait_for_admin_start(self, bot_id, app, db_instance):
+        """Wait for admin to /start the hosted bot before pre-caching media.
+        Polls every 3 seconds for up to 5 minutes."""
+        bot_username = app.bot.username or bot_id
+        logger.info(f"⏳ Waiting for admin to /start @{bot_username}...")
+
+        for i in range(100):  # 100 * 3s = 5 minutes max
+            await asyncio.sleep(3)
+            if app.bot_data.get("admin_started"):
+                logger.info(f"✅ Admin started @{bot_username}, beginning media pre-cache...")
+                await self._pre_cache_media(app, db_instance)
+                return
+
+        # Timeout — admin didn't start the bot
+        logger.warning(f"⏰ Admin didn't /start @{bot_username} within 5 minutes")
+        # Clear the flag so bot works normally even without pre-cache
+        app.bot_data["awaiting_admin_start"] = False
+        try:
+            owner_ids = list(app.bot_data.get("owner_ids", set()))
+            for oid in owner_ids:
+                try:
+                    await app.bot.send_message(
+                        chat_id=oid,
+                        text=(
+                            f"⚠️ *Setup Timeout*\n\n"
+                            f"You didn't /start @{bot_username} within 5 minutes.\n"
+                            f"Media sync skipped. Bot is running but media may not work properly.\n\n"
+                            f"Send /start to @{bot_username} to use it normally."
+                        ),
+                        parse_mode="Markdown",
+                    )
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.warning(f"Failed to notify about timeout: {e}")
+
+    # ──────────────── PRE-CACHE MEDIA ────────────────
+
+    async def _pre_cache_media(self, hosted_app, hosted_db):
+        """
+        Pre-cache all media from main bot to hosted bot at startup.
+        """
+        try:
+            context_proxy = _SimpleContext(hosted_app)
+            main_bot_obj = hosted_app.bot_data.get("main_bot")
+            if not main_bot_obj:
+                return
+                
+            from utils.bot_helpers import get_owner_ids
+            owner_list = list(get_owner_ids(context_proxy))
+            dump_chat_id = owner_list[-1] if owner_list else None
+            setup_msg = None
+            
+            if dump_chat_id:
+                try:
+                    setup_msg = await hosted_app.bot.send_message(
+                        chat_id=dump_chat_id,
+                        text="⚙️ *Bot Setup in Progress...*\n\nSyncing media files from the main bot. You will see some media appear and disappear here.\n\n*Please ignore them until setup is complete.*",
+                        parse_mode="Markdown"
+                    )
+                except Exception:
+                    pass
+
+            cloned_count = 0
+            failed_count = 0
+
+            async def _safe_clone(rid):
+                """Clone one media item, never crash the whole loop."""
+                nonlocal cloned_count, failed_count
+                try:
+                    await get_translated_file_id(context_proxy, rid)
+                    cloned_count += 1
+                except Exception as e:
+                    failed_count += 1
+                    logger.warning(f"Pre-cache failed for {str(rid)[:20]}...: {e}")
+                await asyncio.sleep(2)
+
+            # 1. Welcome media (multi)
+            welcome_ids_json = await self.main_db.get_setting("welcome_media_ids")
+            if welcome_ids_json and welcome_ids_json != "[]":
+                try:
+                    for raw_id in json.loads(welcome_ids_json):
+                        if raw_id:
+                            await _safe_clone(raw_id)
+                except Exception as e:
+                    logger.warning(f"Pre-cache welcome media parse: {e}")
+
+            # 2. Welcome video/photo (legacy single)
+            for key, prefix in [("welcome_video_id", "video:"), ("welcome_photo_id", "photo:")]:
+                fid = await self.main_db.get_setting(key)
+                if fid:
+                    await _safe_clone(f"{prefix}{fid}")
+
+            # 3. Proof photo
+            proof_photo = await self.main_db.get_setting("proof_photo_id")
+            if proof_photo:
+                await _safe_clone(f"photo:{proof_photo}")
+
+            # 4. HTU video
+            htu_video = await self.main_db.get_setting("htu_video_id")
+            if htu_video:
+                await _safe_clone(f"video:{htu_video}")
+
+            # 5. QR image
+            qr_image = await self.main_db.get_setting("qr_image_id")
+            if qr_image:
+                await _safe_clone(f"photo:{qr_image}")
+
+            # 6. All product trial media
+            products = await self.main_db.get_all_products()
+            for product in products:
+                trial_ids = product.get("trial_file_ids_list", [])
+                for raw_id in trial_ids:
+                    if raw_id:
+                        await _safe_clone(raw_id)
+                        
+            if setup_msg:
+                try:
+                    status = f"✅ Bot Setup Complete!\n\n✅ {cloned_count} media synced"
+                    if failed_count:
+                        status += f"\n⚠️ {failed_count} failed (will retry on demand)"
+                    await setup_msg.edit_text(status)
+                except Exception:
+                    pass
+
+            bot_username = hosted_app.bot_data.get("bot_id", "unknown")
+            logger.info(f"✅ Pre-cached {cloned_count} media, {failed_count} failed for bot {bot_username}")
+
+        except Exception as e:
+            logger.error(f"Pre-cache media failed: {e}")
+
     # ──────────────── STOP BOT ────────────────
 
     async def stop_bot(self, bot_id, reason="manual"):
         """Stop a running bot instance."""
         if bot_id not in self.bots:
-            # Bot not running, just update status
             await self.main_db.execute(
                 "UPDATE hosted_bots SET status = 'stopped', stopped_at = ?, stopped_reason = ? WHERE id = ?",
                 [datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"), reason, bot_id],
@@ -283,7 +429,6 @@ class BotManager:
         app = bot_data["app"]
         db_inst = bot_data["db"]
 
-        # Stop polling
         try:
             if app.updater and app.updater.running:
                 await app.updater.stop()
@@ -292,20 +437,14 @@ class BotManager:
         except Exception as e:
             logger.warning(f"Error stopping bot {bot_id}: {e}")
 
-        # Close db
         await db_inst.close()
-
-        # Remove from running bots
         del self.bots[bot_id]
 
-        # Update status
         now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
         await self.main_db.execute(
             "UPDATE hosted_bots SET status = 'stopped', stopped_at = ?, stopped_reason = ? WHERE id = ?",
             [now, reason, bot_id],
         )
-
-        # Log
         await self._log(bot_id, "stopped", f"Reason: {reason}")
 
     # ──────────────── RESUME BOT ────────────────
@@ -318,48 +457,40 @@ class BotManager:
         if not result.rows:
             raise ValueError("Bot not found.")
 
-        record = _row_to_bot(result.rows[0])
+        record = _row_to_hosted_bot(result.rows[0])
 
         if bot_id in self.bots:
             return  # Already running
 
-        # Update status
         await self.main_db.execute(
             "UPDATE hosted_bots SET status = 'active', stopped_at = '', stopped_reason = '' WHERE id = ?",
             [bot_id],
         )
 
-        # Start the bot
         record["status"] = "active"
         await self._start_bot(record)
-
-        # Log
         await self._log(bot_id, "resumed", "Bot resumed")
 
     # ──────────────── DELETE BOT ────────────────
 
     async def delete_bot(self, bot_id):
-        """Stop and completely delete a bot — drops all its data tables."""
-        # Stop if running
+        """Stop and completely delete a bot — drops all data tables."""
         if bot_id in self.bots:
             await self.stop_bot(bot_id, reason="deleted")
 
-        # Get table prefix
+        # Get table prefix and drop per-bot tables (users, orders, settings)
         result = await self.main_db.execute(
             "SELECT table_prefix FROM hosted_bots WHERE id = ?", [bot_id]
         )
         if result.rows:
             prefix = result.rows[0][0]
-            # Drop all data tables
             temp_db = Database(table_prefix=prefix)
             await temp_db.connect()
-            await temp_db.drop_all_tables()
+            await temp_db.drop_bot_tables()
             await temp_db.close()
 
         # Delete record
         await self.main_db.execute("DELETE FROM hosted_bots WHERE id = ?", [bot_id])
-
-        # Log
         await self._log(bot_id, "deleted", "Bot deleted — all data removed")
 
     # ──────────────── EXPIRY ────────────────
@@ -374,40 +505,78 @@ class BotManager:
         await self._log(bot_id, "expiry_set", f"Expiry set to: {expires_str or 'never'}")
 
     async def check_expiries(self):
-        """Background task: check for expired bots every hour."""
+        """Background task: check for expired bots and admin access every hour."""
         while True:
             try:
                 now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+
+                # ── 1. Check bot expiries ──
                 result = await self.main_db.execute(
                     "SELECT * FROM hosted_bots WHERE status = 'active' AND expires_at != '' AND expires_at < ?",
                     [now],
                 )
 
                 for row in (result.rows or []):
-                    record = _row_to_bot(row)
+                    record = _row_to_hosted_bot(row)
                     bot_id = record["id"]
                     logger.info(f"⏰ Bot {bot_id} (@{record['bot_username']}) has expired")
 
-                    # Stop the bot
                     await self.stop_bot(bot_id, reason="expired")
 
-                    # Drop all data tables
                     try:
                         temp_db = Database(table_prefix=record["table_prefix"])
                         await temp_db.connect()
-                        await temp_db.drop_all_tables()
+                        await temp_db.drop_bot_tables()
                         await temp_db.close()
                     except Exception as e:
                         logger.warning(f"Failed to drop tables for expired bot {bot_id}: {e}")
 
-                    # Update status to expired
                     await self.main_db.execute(
                         "UPDATE hosted_bots SET status = 'expired' WHERE id = ?",
                         [bot_id],
                     )
-
                     await self._log(bot_id, "expired", "Bot expired — data cleaned up")
-                    logger.info(f"✅ Expired bot {bot_id} cleaned up")
+
+                # ── 2. Check admin expiries ──
+                try:
+                    expired_admins = await self.main_db.get_expired_admins()
+                    for admin in expired_admins:
+                        admin_id = admin["user_id"]
+                        logger.info(f"⏰ Admin {admin_id} access has expired")
+
+                        # Stop their hosted bot
+                        hosted = await self.main_db.get_hosted_bot_by_admin(admin_id)
+                        if hosted and hosted["id"] in self.bots:
+                            await self.stop_bot(hosted["id"], reason="admin_expired")
+                            await self.main_db.execute(
+                                "UPDATE hosted_bots SET status = 'stopped', stopped_reason = 'admin_expired' WHERE id = ?",
+                                [hosted["id"]],
+                            )
+                            await self._log(hosted["id"], "admin_expired", f"Admin {admin_id} access expired — bot paused")
+
+                        # Remove admin access
+                        await self.main_db.remove_hosting_admin(admin_id)
+                        logger.info(f"✅ Removed expired admin {admin_id}")
+
+                        # Notify main owner
+                        try:
+                            if self.main_application:
+                                bot_info = f" (@{hosted['bot_username']})" if hosted else ""
+                                await self.main_application.bot.send_message(
+                                    chat_id=self.main_owner_id,
+                                    text=(
+                                        f"⏰ *Admin Expired*\n\n"
+                                        f"Admin `{admin_id}` access has expired.\n"
+                                        f"Hosted bot{bot_info} has been paused.\n\n"
+                                        f"Expired at: {admin.get('expires_at', '?')}"
+                                    ),
+                                    parse_mode="Markdown",
+                                )
+                        except Exception as e:
+                            logger.warning(f"Failed to notify owner about admin expiry: {e}")
+
+                except Exception as e:
+                    logger.error(f"Error checking admin expiries: {e}")
 
             except Exception as e:
                 logger.error(f"Error in expiry checker: {e}")
@@ -422,7 +591,7 @@ class BotManager:
             "SELECT * FROM hosted_bots WHERE id = ?", [bot_id]
         )
         if result.rows:
-            return _row_to_bot(result.rows[0])
+            return _row_to_hosted_bot(result.rows[0])
         return None
 
     async def get_all_bots(self):
@@ -430,7 +599,7 @@ class BotManager:
         result = await self.main_db.execute(
             "SELECT * FROM hosted_bots ORDER BY created_at DESC"
         )
-        return [_row_to_bot(row) for row in (result.rows or [])]
+        return [_row_to_hosted_bot(row) for row in (result.rows or [])]
 
     async def get_bot_stats(self, bot_id):
         """Get statistics for a specific hosted bot."""
