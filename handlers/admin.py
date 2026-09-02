@@ -273,21 +273,33 @@ async def _get_current_setting(context, key):
 
 
 async def _reset_products(update, context):
-    """Reset hosted bot's custom products — go back to mirroring main bot."""
+    """Reset hosted bot's custom products — deep clone fresh from main bot."""
     if is_main_bot(context):
         await update.callback_query.answer("❌ Cannot reset on main bot.", show_alert=True)
         return await _show_admin_menu(update, context)
 
     db = get_db(context)
-    product_count = await db.get_product_count()
-    if product_count == 0:
-        await update.callback_query.answer("ℹ️ Already using mirrored products from main bot.", show_alert=True)
-        return await _show_admin_menu(update, context)
+    main_db = get_main_db(context)
 
     # Delete all per-bot products
     t = db._t
     await db.execute(f"DELETE FROM {t('products')}")
-    await update.callback_query.answer(f"✅ {product_count} custom products removed!\nNow using main bot's mirrored products.", show_alert=True)
+
+    # Deep clone fresh products from main bot
+    main_products = await main_db.get_all_products(active_only=False)
+    for product in main_products:
+        await db.add_product(
+            name=product["name"],
+            price=product["price"],
+            description=product.get("description", ""),
+            trial_file_ids=json.dumps(product.get("trial_file_ids_list", [])),
+            channel_link=product.get("channel_link", ""),
+        )
+
+    await update.callback_query.answer(
+        f"✅ Products reset! {len(main_products)} products cloned from main bot.",
+        show_alert=True,
+    )
     return await _show_admin_menu(update, context)
 
 

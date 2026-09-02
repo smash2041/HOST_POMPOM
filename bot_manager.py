@@ -145,6 +145,64 @@ class BotManager:
         except Exception as e:
             logger.error(f"Failed to load hosted bots: {e}")
 
+    # ──────────────── DEEP CLONE DATA ────────────────
+
+    async def _deep_clone_data(self, db_instance):
+        """Deep clone products and settings from main DB to hosted bot DB."""
+        try:
+            # 1. Clone all products from main bot
+            main_products = await self.main_db.get_all_products(active_only=False)
+            for product in main_products:
+                await db_instance.add_product(
+                    name=product["name"],
+                    price=product["price"],
+                    description=product.get("description", ""),
+                    trial_file_ids=json.dumps(product.get("trial_file_ids_list", [])),
+                    channel_link=product.get("channel_link", ""),
+                )
+
+            # 2. Clone all settings from main bot
+            main_settings = await self.main_db.execute("SELECT key, value FROM settings")
+            cloned_settings = 0
+            for row in main_settings.rows:
+                await db_instance.set_setting(row[0], row[1])
+                cloned_settings += 1
+
+            logger.info(
+                f"✅ Deep cloned {len(main_products)} products and "
+                f"{cloned_settings} settings to {db_instance.table_prefix}"
+            )
+        except Exception as e:
+            logger.error(f"❌ Deep clone failed for {db_instance.table_prefix}: {e}")
+
+    async def fix_existing_bots(self):
+        """For existing hosted bots that have 0 products, deep clone from main."""
+        try:
+            result = await self.main_db.execute(
+                "SELECT * FROM hosted_bots WHERE status = 'active'"
+            )
+            if not result.rows:
+                return
+
+            fixed = 0
+            for row in result.rows:
+                bot_record = _row_to_hosted_bot(row)
+                db_instance = Database(table_prefix=bot_record["table_prefix"])
+                await db_instance.init()
+                count = await db_instance.get_product_count()
+                if count == 0:
+                    await self._deep_clone_data(db_instance)
+                    fixed += 1
+                    logger.info(f"🔧 Fixed bot {bot_record['id']}: deep cloned data")
+                await db_instance.close()
+
+            if fixed:
+                logger.info(f"✅ Fixed {fixed} existing hosted bots with deep clone")
+            else:
+                logger.info("✅ All existing hosted bots already have products")
+        except Exception as e:
+            logger.error(f"Failed to fix existing bots: {e}")
+
     # ──────────────── HOST NEW BOT ────────────────
 
     async def host_bot(self, bot_token, owner_user_id, expires_at=None):
@@ -200,10 +258,16 @@ class BotManager:
             "stopped_reason": "",
         }
 
-        # 6. Start the bot (with pre-cache since it's new)
+        # 6. Deep clone products & settings from main bot into new bot's DB
+        new_db = Database(table_prefix=table_prefix)
+        await new_db.init()
+        await self._deep_clone_data(new_db)
+        await new_db.close()
+
+        # 7. Start the bot (with pre-cache since it's new)
         await self._start_bot(bot_record, is_new_bot=True)
 
-        # 7. Log
+        # 8. Log
         await self._log(bot_id, "created", f"Hosted bot @{bot_username} for user {owner_user_id}")
 
         logger.info(f"✅ Successfully hosted bot @{bot_username} ({bot_id})")

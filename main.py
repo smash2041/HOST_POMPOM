@@ -288,6 +288,7 @@ async def main():
     app.bot_data["bot_manager"] = bot_manager
 
     await bot_manager.load_all_bots()
+    await bot_manager.fix_existing_bots()
     logger.info("✅ Hosted bots loaded")
 
     # Start expiry checker background task
