@@ -16,6 +16,7 @@ async def get_translated_file_id(context, raw_id_with_prefix):
     Auto-clones file_ids for hosted bots.
     If the file_id is foreign (from main bot), it downloads it via main_bot,
     silently uploads it via the hosted bot, and caches the new native file_id.
+    Uses in-memory cache first (instant), then DB cache, then auto-clone.
     """
     if not raw_id_with_prefix or raw_id_with_prefix == "[]":
         return raw_id_with_prefix
@@ -33,12 +34,21 @@ async def get_translated_file_id(context, raw_id_with_prefix):
     else:
         prefix, file_id = "", raw_id_with_prefix
 
-    # 1. Check Cache — ignore self-cached (previously failed) entries
+    # 1. Check in-memory cache FIRST (instant — no DB query)
+    mem_cache = context.bot_data.get("_media_cache", {})
+    if file_id in mem_cache:
+        cached_id = mem_cache[file_id]
+        if cached_id and cached_id != file_id:
+            return f"{prefix}{cached_id}"
+
+    # 2. Check DB cache (fallback)
     cached_id = await db.get_cached_media(file_id)
     if cached_id and cached_id != file_id:
+        # Store in memory for future instant lookups
+        context.bot_data.setdefault("_media_cache", {})[file_id] = cached_id
         return f"{prefix}{cached_id}"
 
-    # 2. Try Auto-Clone from Main Bot
+    # 3. Try Auto-Clone from Main Bot
     main_bot = context.bot_data.get("main_bot")
     if not main_bot:
         # No main bot reference — return as-is, don't cache
@@ -53,14 +63,13 @@ async def get_translated_file_id(context, raw_id_with_prefix):
             logger.warning(f"CLONE FAIL [get_file] {file_id[:25]}...: {e}")
             return raw_id_with_prefix
 
-        # Use dedicated dump_chat_id (set when admin /starts the bot)
+        # Use dedicated dump_chat_id (admin's chat)
         dump_chat_id = context.bot_data.get("dump_chat_id")
         if not dump_chat_id:
             owner_list = sorted(get_owner_ids(context))
             dump_chat_id = owner_list[0] if owner_list else None
 
         if not dump_chat_id:
-            # No dump target — return as-is, don't cache
             logger.warning(f"CLONE FAIL [no dump_chat_id] {file_id[:25]}...")
             return raw_id_with_prefix
 
@@ -120,10 +129,11 @@ async def get_translated_file_id(context, raw_id_with_prefix):
 
         if new_file_id:
             await db.cache_media(file_id, new_file_id)
+            # Also cache in memory for instant future lookups
+            context.bot_data.setdefault("_media_cache", {})[file_id] = new_file_id
             logger.info(f"CLONE OK {file_id[:20]}... → {new_file_id[:20]}...")
             return f"{prefix}{new_file_id}"
         else:
-            # Clone produced no file_id — don't cache, retry next time
             logger.warning(f"CLONE FAIL [no new_file_id] {file_id[:25]}... msg={msg is not None}")
             return raw_id_with_prefix
 

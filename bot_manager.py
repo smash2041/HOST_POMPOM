@@ -498,20 +498,32 @@ class BotManager:
             # ── Clone media with progress tracking ──
             cloned_count = 0
             failed_count = 0
-            skipped_count = 0
+            failed_items = []  # Track failed items for retry
             last_update_pct = -10
 
             for i, rid in enumerate(all_media):
-                try:
-                    result = await get_translated_file_id(context_proxy, rid)
-                    if result != rid:
-                        cloned_count += 1  # Actually got a new (cloned) file_id
-                    else:
-                        failed_count += 1  # Returned original = clone failed silently
-                        logger.warning(f"Pre-cache silent fail for {str(rid)[:30]}... (returned original)")
-                except Exception as e:
+                success = False
+                for attempt in range(3):  # Up to 3 attempts per item
+                    try:
+                        result = await get_translated_file_id(context_proxy, rid)
+                        if result != rid:
+                            cloned_count += 1
+                            success = True
+                            break
+                        else:
+                            if attempt < 2:
+                                logger.info(f"Pre-cache retry {attempt+1} for {str(rid)[:30]}...")
+                                await asyncio.sleep(3)
+                    except Exception as e:
+                        if attempt < 2:
+                            logger.info(f"Pre-cache retry {attempt+1} for {str(rid)[:20]}...: {e}")
+                            await asyncio.sleep(3)
+
+                if not success:
                     failed_count += 1
-                    logger.warning(f"Pre-cache exception for {str(rid)[:20]}...: {e}")
+                    failed_items.append(rid)
+                    logger.warning(f"Pre-cache FAILED after 3 attempts: {str(rid)[:30]}...")
+
                 await asyncio.sleep(2)
 
                 # Update progress in main bot (every 10% or on last item)

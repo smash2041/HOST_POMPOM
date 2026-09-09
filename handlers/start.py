@@ -12,7 +12,7 @@ from telegram.ext import ContextTypes
 
 from utils.bot_helpers import (
     get_db, get_forward_protection, get_auto_disappear,
-    get_setting_with_fallback, get_products_db,
+    get_setting_with_fallback, get_products_db, is_main_bot,
 )
 from utils.media_clone import get_translated_file_id
 from utils.helpers import format_price
@@ -110,6 +110,10 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 media_group = []
                 for raw_id in welcome_ids:
                     translated_id = await get_translated_file_id(context, raw_id)
+                    # Skip un-cloned media on hosted bots (main bot file_ids won't work)
+                    if translated_id == raw_id and not is_main_bot(context):
+                        logger.warning(f"Skipping un-cloned welcome media: {raw_id[:30]}...")
+                        continue
                     if translated_id.startswith("photo:"):
                         media_group.append(InputMediaPhoto(translated_id.replace("photo:", "", 1)))
                     elif translated_id.startswith("video:"):
@@ -189,6 +193,10 @@ async def product_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not raw_id:
                 continue
             translated_id = await get_translated_file_id(context, raw_id)
+            # Skip un-cloned media on hosted bots (main bot file_ids won't work)
+            if translated_id == raw_id and not is_main_bot(context):
+                logger.warning(f"Skipping un-cloned trial media: {raw_id[:30]}...")
+                continue
             if translated_id.startswith("photo:"):
                 media_group.append(InputMediaPhoto(translated_id.replace("photo:", "", 1)))
             elif translated_id.startswith("video:"):
