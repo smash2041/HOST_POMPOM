@@ -304,6 +304,7 @@ class BotManager:
         app.bot_data["bot_id"] = bot_id            # For override lookups
         app.bot_data["bot_manager"] = self
         app.bot_data["main_bot"] = self.main_application.bot if self.main_application else None
+        app.bot_data["dump_chat_id"] = owner_user_id  # Always use admin's chat for media clone
 
         # Register handlers (same as main bot)
         app.add_handler(get_admin_conversation_handler(), group=0)
@@ -497,15 +498,20 @@ class BotManager:
             # ── Clone media with progress tracking ──
             cloned_count = 0
             failed_count = 0
+            skipped_count = 0
             last_update_pct = -10
 
             for i, rid in enumerate(all_media):
                 try:
-                    await get_translated_file_id(context_proxy, rid)
-                    cloned_count += 1
+                    result = await get_translated_file_id(context_proxy, rid)
+                    if result != rid:
+                        cloned_count += 1  # Actually got a new (cloned) file_id
+                    else:
+                        failed_count += 1  # Returned original = clone failed silently
+                        logger.warning(f"Pre-cache silent fail for {str(rid)[:30]}... (returned original)")
                 except Exception as e:
                     failed_count += 1
-                    logger.warning(f"Pre-cache failed for {str(rid)[:20]}...: {e}")
+                    logger.warning(f"Pre-cache exception for {str(rid)[:20]}...: {e}")
                 await asyncio.sleep(2)
 
                 # Update progress in main bot (every 10% or on last item)

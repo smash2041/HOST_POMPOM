@@ -74,7 +74,6 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if update.effective_user.id in owner_ids:
             context.bot_data["awaiting_admin_start"] = False
             context.bot_data["admin_started"] = True
-            context.bot_data["dump_chat_id"] = update.effective_user.id
             await update.message.reply_text(
                 "✅ *Bot Activated!*\n\n"
                 "⚙️ Setting up media files... Please wait.",

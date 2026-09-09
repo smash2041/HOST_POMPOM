@@ -50,7 +50,7 @@ async def get_translated_file_id(context, raw_id_with_prefix):
             tg_file = await main_bot.get_file(file_id)
         except Exception as e:
             # Could be native file or transient error — don't cache, retry next time
-            logger.info(f"Media {file_id[:20]}... not on main bot or error: {e}")
+            logger.warning(f"CLONE FAIL [get_file] {file_id[:25]}...: {e}")
             return raw_id_with_prefix
 
         # Use dedicated dump_chat_id (set when admin /starts the bot)
@@ -61,6 +61,7 @@ async def get_translated_file_id(context, raw_id_with_prefix):
 
         if not dump_chat_id:
             # No dump target — return as-is, don't cache
+            logger.warning(f"CLONE FAIL [no dump_chat_id] {file_id[:25]}...")
             return raw_id_with_prefix
 
         msg = None
@@ -71,6 +72,8 @@ async def get_translated_file_id(context, raw_id_with_prefix):
 
         try:
             await tg_file.download_to_drive(temp_path)
+            file_size = os.path.getsize(temp_path)
+            logger.info(f"Downloaded {file_id[:20]}... ({file_size} bytes), uploading to {dump_chat_id}")
             with open(temp_path, 'rb') as f:
                 if prefix == "video:":
                     msg = await context.bot.send_video(
@@ -99,6 +102,8 @@ async def get_translated_file_id(context, raw_id_with_prefix):
                         new_file_id = msg.document.file_id
                     elif msg and msg.video:
                         new_file_id = msg.video.file_id
+        except Exception as upload_err:
+            logger.warning(f"CLONE FAIL [upload] {file_id[:25]}... to chat {dump_chat_id}: {upload_err}")
         finally:
             if os.path.exists(temp_path):
                 try:
@@ -115,13 +120,14 @@ async def get_translated_file_id(context, raw_id_with_prefix):
 
         if new_file_id:
             await db.cache_media(file_id, new_file_id)
-            logger.info(f"Successfully cloned media {file_id[:20]}...")
+            logger.info(f"CLONE OK {file_id[:20]}... → {new_file_id[:20]}...")
             return f"{prefix}{new_file_id}"
         else:
             # Clone produced no file_id — don't cache, retry next time
+            logger.warning(f"CLONE FAIL [no new_file_id] {file_id[:25]}... msg={msg is not None}")
             return raw_id_with_prefix
 
     except Exception as e:
-        logger.warning(f"Auto-clone failed for {file_id[:20]}...: {e}")
+        logger.warning(f"CLONE FAIL [exception] {file_id[:20]}...: {e}")
         # DON'T cache failed clone — will retry on next request
         return raw_id_with_prefix
