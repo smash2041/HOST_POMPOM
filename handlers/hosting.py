@@ -265,7 +265,7 @@ async def bot_expiry_selected(update: Update, context: ContextTypes.DEFAULT_TYPE
     
     async def _host_in_background():
         try:
-            bot_record = await bot_manager.host_bot(token, owner_user_id, expires_str)
+            bot_record = await bot_manager.host_bot(token, owner_user_id, expires_str, progress_chat_id=chat_id)
             expiry_text = expires_at.strftime("%Y-%m-%d %H:%M") if expires_at else "Never"
 
             # Show success message with deep-link to start the hosted bot

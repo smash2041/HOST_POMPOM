@@ -33,34 +33,34 @@ async def get_translated_file_id(context, raw_id_with_prefix):
     else:
         prefix, file_id = "", raw_id_with_prefix
 
-    # 1. Check Cache
+    # 1. Check Cache — ignore self-cached (previously failed) entries
     cached_id = await db.get_cached_media(file_id)
-    if cached_id:
+    if cached_id and cached_id != file_id:
         return f"{prefix}{cached_id}"
 
     # 2. Try Auto-Clone from Main Bot
     main_bot = context.bot_data.get("main_bot")
     if not main_bot:
-        await db.cache_media(file_id, file_id)
+        # No main bot reference — return as-is, don't cache
         return raw_id_with_prefix
 
     try:
-        # Check if main bot owns this file. If not, it was uploaded directly
-        # to the hosted bot (native) or is invalid. In either case, don't retry!
+        # Check if main bot owns this file
         try:
             tg_file = await main_bot.get_file(file_id)
         except Exception as e:
-            # File is native to hosted bot or not on main bot.
-            # Cache it as native so we never check or delay again!
-            logger.info(f"Media {file_id[:20]}... not on main bot (native/direct). Cached.")
-            await db.cache_media(file_id, file_id)
+            # Could be native file or transient error — don't cache, retry next time
+            logger.info(f"Media {file_id[:20]}... not on main bot or error: {e}")
             return raw_id_with_prefix
 
-        owner_list = list(get_owner_ids(context))
-        dump_chat_id = owner_list[-1] if owner_list else None
+        # Use dedicated dump_chat_id (set when admin /starts the bot)
+        dump_chat_id = context.bot_data.get("dump_chat_id")
+        if not dump_chat_id:
+            owner_list = sorted(get_owner_ids(context))
+            dump_chat_id = owner_list[0] if owner_list else None
 
         if not dump_chat_id:
-            await db.cache_media(file_id, file_id)
+            # No dump target — return as-is, don't cache
             return raw_id_with_prefix
 
         msg = None
@@ -118,11 +118,10 @@ async def get_translated_file_id(context, raw_id_with_prefix):
             logger.info(f"Successfully cloned media {file_id[:20]}...")
             return f"{prefix}{new_file_id}"
         else:
-            await db.cache_media(file_id, file_id)
+            # Clone produced no file_id — don't cache, retry next time
             return raw_id_with_prefix
 
     except Exception as e:
         logger.warning(f"Auto-clone failed for {file_id[:20]}...: {e}")
-        # Cache failed ID as native so it never stalls future requests
-        await db.cache_media(file_id, file_id)
+        # DON'T cache failed clone — will retry on next request
         return raw_id_with_prefix

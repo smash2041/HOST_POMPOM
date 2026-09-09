@@ -210,7 +210,7 @@ class BotManager:
 
     # ──────────────── HOST NEW BOT ────────────────
 
-    async def host_bot(self, bot_token, owner_user_id, expires_at=None):
+    async def host_bot(self, bot_token, owner_user_id, expires_at=None, progress_chat_id=None):
         """
         Host a new bot instance.
         Validates token, creates tables, starts polling.
@@ -270,7 +270,7 @@ class BotManager:
         await new_db.close()
 
         # 7. Start the bot (with pre-cache since it's new)
-        await self._start_bot(bot_record, is_new_bot=True)
+        await self._start_bot(bot_record, is_new_bot=True, progress_chat_id=progress_chat_id)
 
         # 8. Log
         await self._log(bot_id, "created", f"Hosted bot @{bot_username} for user {owner_user_id}")
@@ -280,7 +280,7 @@ class BotManager:
 
     # ──────────────── START BOT INSTANCE ────────────────
 
-    async def _start_bot(self, bot_record, is_new_bot=False):
+    async def _start_bot(self, bot_record, is_new_bot=False, progress_chat_id=None):
         """Create Application, register handlers, start polling — MIRROR setup."""
         from handlers.admin import get_admin_conversation_handler
 
@@ -331,6 +331,8 @@ class BotManager:
         if self.main_application and is_new_bot:
             app.bot_data["awaiting_admin_start"] = True
             app.bot_data["admin_started"] = False
+            app.bot_data["progress_chat_id"] = progress_chat_id
+            app.bot_data["progress_bot"] = self.main_application.bot if self.main_application else None
 
         # Start polling
         await app.start()
@@ -393,18 +395,29 @@ class BotManager:
     async def _pre_cache_media(self, hosted_app, hosted_db):
         """
         Pre-cache all media from main bot to hosted bot at startup.
+        Reports clone progress % to main bot.
         """
         try:
             context_proxy = _SimpleContext(hosted_app)
             main_bot_obj = hosted_app.bot_data.get("main_bot")
             if not main_bot_obj:
                 return
-                
+
             from utils.bot_helpers import get_owner_ids
             owner_list = list(get_owner_ids(context_proxy))
-            dump_chat_id = owner_list[-1] if owner_list else None
+            dump_chat_id = hosted_app.bot_data.get("dump_chat_id")
+            if not dump_chat_id and owner_list:
+                dump_chat_id = sorted(owner_list)[0]
+
+            bot_username = hosted_app.bot.username or "unknown"
+
+            # Get progress reporting targets (main bot chat)
+            progress_chat_id = hosted_app.bot_data.get("progress_chat_id")
+            progress_bot = hosted_app.bot_data.get("progress_bot")
+
             setup_msg = None
-            
+            progress_msg = None
+
             if dump_chat_id:
                 try:
                     setup_msg = await hosted_app.bot.send_message(
@@ -415,12 +428,78 @@ class BotManager:
                 except Exception:
                     pass
 
+            # ── Collect all media items to clone ──
+            all_media = []
+
+            # 1. Welcome media (multi)
+            welcome_ids_json = await self.main_db.get_setting("welcome_media_ids")
+            if welcome_ids_json and welcome_ids_json != "[]":
+                try:
+                    for raw_id in json.loads(welcome_ids_json):
+                        if raw_id:
+                            all_media.append(raw_id)
+                except Exception as e:
+                    logger.warning(f"Pre-cache welcome media parse: {e}")
+
+            # 2. Welcome video/photo (legacy single)
+            for key, prefix in [("welcome_video_id", "video:"), ("welcome_photo_id", "photo:")]:
+                fid = await self.main_db.get_setting(key)
+                if fid:
+                    all_media.append(f"{prefix}{fid}")
+
+            # 3. Proof photo
+            proof_photo = await self.main_db.get_setting("proof_photo_id")
+            if proof_photo:
+                all_media.append(f"photo:{proof_photo}")
+
+            # 4. HTU video
+            htu_video = await self.main_db.get_setting("htu_video_id")
+            if htu_video:
+                all_media.append(f"video:{htu_video}")
+
+            # 5. QR image
+            qr_image = await self.main_db.get_setting("qr_image_id")
+            if qr_image:
+                all_media.append(f"photo:{qr_image}")
+
+            # 6. All product trial media
+            products = await self.main_db.get_all_products()
+            for product in products:
+                trial_ids = product.get("trial_file_ids_list", [])
+                for raw_id in trial_ids:
+                    if raw_id:
+                        all_media.append(raw_id)
+
+            total = len(all_media)
+
+            # Send initial progress to main bot
+            if progress_chat_id and progress_bot:
+                try:
+                    if total > 0:
+                        progress_msg = await progress_bot.send_message(
+                            chat_id=progress_chat_id,
+                            text=self._format_progress(0, total, 0, 0, bot_username),
+                            parse_mode="HTML",
+                        )
+                    else:
+                        await progress_bot.send_message(
+                            chat_id=progress_chat_id,
+                            text=(
+                                f"✅ <b>Media Sync — @{bot_username}</b>\n\n"
+                                f"No media files to sync.\n\n"
+                                f"🎉 <b>Bot is ready to use!</b>"
+                            ),
+                            parse_mode="HTML",
+                        )
+                except Exception:
+                    pass
+
+            # ── Clone media with progress tracking ──
             cloned_count = 0
             failed_count = 0
+            last_update_pct = -10
 
-            async def _safe_clone(rid):
-                """Clone one media item, never crash the whole loop."""
-                nonlocal cloned_count, failed_count
+            for i, rid in enumerate(all_media):
                 try:
                     await get_translated_file_id(context_proxy, rid)
                     cloned_count += 1
@@ -429,45 +508,21 @@ class BotManager:
                     logger.warning(f"Pre-cache failed for {str(rid)[:20]}...: {e}")
                 await asyncio.sleep(2)
 
-            # 1. Welcome media (multi)
-            welcome_ids_json = await self.main_db.get_setting("welcome_media_ids")
-            if welcome_ids_json and welcome_ids_json != "[]":
-                try:
-                    for raw_id in json.loads(welcome_ids_json):
-                        if raw_id:
-                            await _safe_clone(raw_id)
-                except Exception as e:
-                    logger.warning(f"Pre-cache welcome media parse: {e}")
+                # Update progress in main bot (every 10% or on last item)
+                current = i + 1
+                pct = int(100 * current / total) if total > 0 else 100
+                if progress_msg and progress_bot and (pct >= last_update_pct + 10 or current == total):
+                    last_update_pct = pct
+                    try:
+                        if current == total:
+                            txt = self._format_progress_complete(total, cloned_count, failed_count, bot_username)
+                        else:
+                            txt = self._format_progress(current, total, cloned_count, failed_count, bot_username)
+                        await progress_msg.edit_text(txt, parse_mode="HTML")
+                    except Exception:
+                        pass
 
-            # 2. Welcome video/photo (legacy single)
-            for key, prefix in [("welcome_video_id", "video:"), ("welcome_photo_id", "photo:")]:
-                fid = await self.main_db.get_setting(key)
-                if fid:
-                    await _safe_clone(f"{prefix}{fid}")
-
-            # 3. Proof photo
-            proof_photo = await self.main_db.get_setting("proof_photo_id")
-            if proof_photo:
-                await _safe_clone(f"photo:{proof_photo}")
-
-            # 4. HTU video
-            htu_video = await self.main_db.get_setting("htu_video_id")
-            if htu_video:
-                await _safe_clone(f"video:{htu_video}")
-
-            # 5. QR image
-            qr_image = await self.main_db.get_setting("qr_image_id")
-            if qr_image:
-                await _safe_clone(f"photo:{qr_image}")
-
-            # 6. All product trial media
-            products = await self.main_db.get_all_products()
-            for product in products:
-                trial_ids = product.get("trial_file_ids_list", [])
-                for raw_id in trial_ids:
-                    if raw_id:
-                        await _safe_clone(raw_id)
-                        
+            # Update setup message in hosted bot admin chat
             if setup_msg:
                 try:
                     status = f"✅ Bot Setup Complete!\n\n✅ {cloned_count} media synced"
@@ -477,11 +532,50 @@ class BotManager:
                 except Exception:
                     pass
 
-            bot_username = hosted_app.bot_data.get("bot_id", "unknown")
             logger.info(f"✅ Pre-cached {cloned_count} media, {failed_count} failed for bot {bot_username}")
 
         except Exception as e:
             logger.error(f"Pre-cache media failed: {e}")
+
+    # ──────────────── PROGRESS FORMATTING ────────────────
+
+    @staticmethod
+    def _format_progress(current, total, cloned, failed, bot_username):
+        """Format progress bar message for main bot."""
+        bar_length = 20
+        if total == 0:
+            filled, pct = bar_length, 100
+        else:
+            filled = int(bar_length * current / total)
+            pct = int(100 * current / total)
+        bar = "█" * filled + "░" * (bar_length - filled)
+
+        text = (
+            f"⚙️ <b>Media Sync — @{bot_username}</b>\n\n"
+            f"<code>{bar}</code> {pct}%\n"
+            f"📦 {current} / {total} files processed\n"
+        )
+        if cloned:
+            text += f"✅ {cloned} synced"
+        if failed:
+            text += f" | ⚠️ {failed} failed"
+        text += "\n\n⏳ Please wait..."
+        return text
+
+    @staticmethod
+    def _format_progress_complete(total, cloned, failed, bot_username):
+        """Format completion message for main bot."""
+        bar = "█" * 20
+        text = (
+            f"✅ <b>Media Sync Complete — @{bot_username}</b>\n\n"
+            f"<code>{bar}</code> 100%\n"
+            f"📦 {total} / {total} files processed\n"
+            f"✅ {cloned} synced"
+        )
+        if failed:
+            text += f" | ⚠️ {failed} failed (will retry on demand)"
+        text += f"\n\n🎉 <b>Bot is ready to use!</b>"
+        return text
 
     # ──────────────── STOP BOT ────────────────
 
