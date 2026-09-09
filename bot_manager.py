@@ -87,6 +87,11 @@ async def _hosted_handle_message(update, context):
 
 async def _hosted_error_handler(update, context):
     """Error handler for hosted bots."""
+    err_str = str(context.error).lower()
+    # Suppress harmless Telegram errors so users don't see false error messages
+    if any(s in err_str for s in ["query is too old", "message is not modified", "chat not found", "bot was blocked by"]):
+        return
+
     logger.error(f"Hosted bot error: {context.error}", exc_info=context.error)
     if update and update.effective_chat:
         try:
@@ -288,8 +293,8 @@ class BotManager:
         db_instance = Database(table_prefix=table_prefix)
         await db_instance.init()
 
-        # Create Application
-        app = Application.builder().token(bot_token).build()
+        # Create Application with concurrent updates for parallel speed
+        app = Application.builder().token(bot_token).concurrent_updates(True).build()
 
         # MIRROR SETUP — the key architecture
         app.bot_data["db"] = db_instance          # Per-bot DB (users/orders)
@@ -494,10 +499,16 @@ class BotManager:
         db_inst = bot_data["db"]
 
         try:
-            if app.updater and app.updater.running:
-                await app.updater.stop()
-            await app.stop()
-            await app.shutdown()
+            async def _shutdown_app():
+                if app.updater and app.updater.running:
+                    await app.updater.stop()
+                await app.stop()
+                await app.shutdown()
+
+            try:
+                await asyncio.wait_for(_shutdown_app(), timeout=5.0)
+            except asyncio.TimeoutError:
+                logger.warning(f"Shutdown timed out for bot {bot_id}, forcing close")
         except Exception as e:
             logger.warning(f"Error stopping bot {bot_id}: {e}")
 

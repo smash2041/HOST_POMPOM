@@ -24,7 +24,10 @@ async def buy_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     products_db = await get_products_db(context)
     query = update.callback_query
-    await query.answer()
+    try:
+        await query.answer()
+    except Exception:
+        pass
 
     product_id = int(query.data.split("_")[1])
     product = await products_db.get_product(product_id)
@@ -106,7 +109,10 @@ async def paid_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db = get_db(context)
     products_db = await get_products_db(context)
     query = update.callback_query
-    await query.answer()
+    try:
+        await query.answer()
+    except Exception:
+        pass
 
     product_id = int(query.data.split("_")[1])
     product = await products_db.get_product(product_id)

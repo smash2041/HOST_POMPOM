@@ -204,8 +204,8 @@ async def main():
     await db.init()
     logger.info("✅ Database initialized")
 
-    # ── 2. Build Telegram Bot Application ──
-    app = Application.builder().token(BOT_TOKEN).build()
+    # ── 2. Create Application with concurrent updates ──
+    app = Application.builder().token(BOT_TOKEN).concurrent_updates(True).build()
 
     # Set bot_data for multi-bot system
     app.bot_data["db"] = db

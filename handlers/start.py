@@ -166,7 +166,10 @@ async def product_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Product button click — trial media + buy/back buttons."""
     products_db = await get_products_db(context)
     query = update.callback_query
-    await query.answer()
+    try:
+        await query.answer()
+    except Exception:
+        pass
 
     product_id = int(query.data.split("_")[1])
     product = await products_db.get_product(product_id)
@@ -248,7 +251,10 @@ async def product_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def back_to_products_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    try:
+        await query.answer()
+    except Exception:
+        pass
     reply_markup = await build_product_keyboard(context)
     try:
         await query.edit_message_text(WELCOME_TEXT, reply_markup=reply_markup, parse_mode="Markdown")
@@ -261,7 +267,10 @@ async def back_to_products_callback(update: Update, context: ContextTypes.DEFAUL
 
 async def show_proof_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    try:
+        await query.answer()
+    except Exception:
+        pass
     proof_photo = await get_setting_with_fallback(context, "proof_photo_id")
     if proof_photo:
         translated_id = await get_translated_file_id(context, f"photo:{proof_photo}")
@@ -279,7 +288,10 @@ async def show_proof_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 async def how_to_use_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    try:
+        await query.answer()
+    except Exception:
+        pass
     video_id = await get_setting_with_fallback(context, "htu_video_id")
     text = await get_setting_with_fallback(context, "htu_text")
     if video_id and text:
@@ -301,7 +313,10 @@ async def how_to_use_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 async def report_issue_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    try:
+        await query.answer()
+    except Exception:
+        pass
     context.user_data["awaiting_issue"] = True
     keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data="cancel_issue")]]
     await context.bot.send_message(
@@ -314,6 +329,9 @@ async def report_issue_callback(update: Update, context: ContextTypes.DEFAULT_TY
 
 async def cancel_issue_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    try:
+        await query.answer()
+    except Exception:
+        pass
     context.user_data.pop("awaiting_issue", None)
     await query.edit_message_text("✅ Issue reporting cancelled.")
