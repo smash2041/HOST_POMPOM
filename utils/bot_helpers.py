@@ -102,3 +102,20 @@ async def get_auto_disappear(context):
     main_db = get_main_db(context)
     result = await main_db.get_setting("auto_disappear")
     return result == "1"
+
+
+async def get_color_buttons_enabled(context):
+    """Color buttons toggle — GLOBAL (always from main DB)."""
+    main_db = get_main_db(context)
+    result = await main_db.get_setting("color_buttons_enabled")
+    return result != "0"  # Default ON if not set
+
+
+async def get_auto_disappear_seconds(context):
+    """Auto disappear timing in seconds — GLOBAL (always from main DB)."""
+    main_db = get_main_db(context)
+    result = await main_db.get_setting("auto_disappear_seconds")
+    try:
+        return int(result) if result else 1800
+    except (ValueError, TypeError):
+        return 1800

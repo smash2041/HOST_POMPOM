@@ -45,8 +45,8 @@ async def migrate():
 
     # ── 1. Migrate main bot tables ──
     await _migrate_table(cursor, target, "products",
-        "INSERT OR REPLACE INTO products (id, name, price, description, trial_file_ids, channel_link, sort_order, is_active) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        ["id", "name", "price", "description", "trial_file_ids", "channel_link", "sort_order", "is_active"],
+        "INSERT OR REPLACE INTO products (id, name, price, description, trial_file_ids, channel_link, sort_order, is_active, button_style) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ["id", "name", "price", "description", "trial_file_ids", "channel_link", "sort_order", "is_active", "button_style"],
     )
 
     await _migrate_table(cursor, target, "settings",
@@ -96,8 +96,8 @@ async def migrate():
     for table_name in hb_tables:
         # Determine table type from suffix
         if table_name.endswith("_products"):
-            sql = f"INSERT OR REPLACE INTO {table_name} (id, name, price, description, trial_file_ids, channel_link, sort_order, is_active) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
-            cols = ["id", "name", "price", "description", "trial_file_ids", "channel_link", "sort_order", "is_active"]
+            sql = f"INSERT OR REPLACE INTO {table_name} (id, name, price, description, trial_file_ids, channel_link, sort_order, is_active, button_style) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            cols = ["id", "name", "price", "description", "trial_file_ids", "channel_link", "sort_order", "is_active", "button_style"]
         elif table_name.endswith("_settings"):
             sql = f"INSERT OR REPLACE INTO {table_name} (key, value) VALUES (?, ?)"
             cols = ["key", "value"]

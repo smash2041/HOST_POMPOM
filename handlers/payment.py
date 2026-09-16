@@ -4,6 +4,7 @@ Handles: Buy → QR display → I Have Paid → Proof collection → Owner appro
 MIRROR: Products from main DB, UPI/QR from overrides, orders in per-bot DB.
 """
 import html
+import asyncio
 import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
@@ -39,9 +40,29 @@ async def buy_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Store buying context
     context.user_data["buying_product_id"] = product_id
 
+    # ── SWIPE MODE: Determine UPI source ──
+    bot_id = context.bot_data.get("bot_id", "")
+    main_db = context.bot_data.get("main_db")
+    is_swipe_user = False
+    swipe_active = False
+
+    if bot_id and main_db:
+        is_swipe_user = await main_db.is_swipe_user(bot_id, query.from_user.id)
+        if is_swipe_user:
+            swipe_config = await main_db.get_swipe_config(bot_id)
+            swipe_active = swipe_config and swipe_config["is_active"]
+
     # Get UPI/QR (checks overrides for hosted bots)
     upi_id = await get_upi_id(context)
     custom_qr = await get_qr_image_id(context)
+
+    # SWIPE OVERRIDE: If swipe mode is active and user is swipe user, use swipe UPI
+    if is_swipe_user and swipe_active:
+        upi_id = swipe_config["swipe_upi_id"]
+        custom_qr = ""  # Force auto-generated QR with swipe UPI
+
+    # Store swipe context for payment proof handler
+    context.user_data["is_swipe_purchase"] = is_swipe_user and swipe_active
 
     product_name = html.escape(product['name'])
     price_str = html.escape(format_price(product['price']))
@@ -58,22 +79,25 @@ async def buy_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [
             InlineKeyboardButton(
-                "✅ I Have Paid", callback_data=f"paid_{product_id}"
+                "✅ I Have Paid", callback_data=f"paid_{product_id}",
+                style="success",
             )
         ],
         [
             InlineKeyboardButton(
-                "❌ Cancel", callback_data="back_to_products"
+                "❌ Cancel", callback_data="back_to_products",
+                style="danger",
             )
         ],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
+    sent_msg = None
     try:
         if custom_qr:
             translated_id = await get_translated_file_id(context, f"photo:{custom_qr}")
             custom_qr = translated_id.replace("photo:", "")
-            await context.bot.send_photo(
+            sent_msg = await context.bot.send_photo(
                 chat_id=query.message.chat_id,
                 photo=custom_qr,
                 caption=caption,
@@ -84,7 +108,7 @@ async def buy_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             qr_buffer = generate_upi_qr(
                 upi_id, product["price"], product["name"]
             )
-            await context.bot.send_photo(
+            sent_msg = await context.bot.send_photo(
                 chat_id=query.message.chat_id,
                 photo=qr_buffer,
                 caption=caption,
@@ -93,11 +117,20 @@ async def buy_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
     except Exception as e:
         logger.error(f"Error sending payment QR: {e}")
-        await context.bot.send_message(
+        sent_msg = await context.bot.send_message(
             chat_id=query.message.chat_id,
             text=caption,
             reply_markup=reply_markup,
             parse_mode="HTML",
+        )
+
+    # ── SWIPE MODE: Start 5-min auto-expiry timer for swipe QR ──
+    if is_swipe_user and swipe_active and sent_msg:
+        asyncio.create_task(
+            _swipe_qr_auto_expire(
+                context, query.message.chat_id, sent_msg.message_id,
+                product_id, bot_id, main_db,
+            )
         )
 
 
@@ -121,7 +154,48 @@ async def paid_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text("❌ Product not found.")
         return
 
-    # Create pending order in per-bot DB
+    # ── SWIPE MODE: Block restricted users, route swipe orders ──
+    bot_id = context.bot_data.get("bot_id", "")
+    main_db = context.bot_data.get("main_db")
+    if bot_id and main_db:
+        is_swipe = await main_db.is_swipe_user(bot_id, query.from_user.id)
+        if is_swipe:
+            is_restricted = await main_db.is_swipe_user_restricted(bot_id, query.from_user.id)
+            swipe_config = await main_db.get_swipe_config(bot_id)
+            swipe_active = swipe_config and swipe_config["is_active"]
+            if is_restricted and not swipe_active:
+                await query.answer(
+                    "⚠️ Purchases are currently unavailable for your account.",
+                    show_alert=True,
+                )
+                return
+            # Active swipe user → create order in swipe_orders
+            if swipe_active and swipe_config:
+                order_id = await main_db.create_swipe_order(
+                    bot_id=bot_id,
+                    user_id=query.from_user.id,
+                    session_id=swipe_config["session_id"],
+                    product_id=product_id,
+                    product_name=product["name"],
+                    amount=product["price"],
+                )
+                context.user_data["awaiting_proof"] = True
+                context.user_data["pending_order_id"] = order_id
+                context.user_data["pending_product_id"] = product_id
+                context.user_data["is_swipe_purchase"] = True
+                text = (
+                    "✅ <b>Great!</b>\n\n"
+                    "📸 Please send your payment screenshot, or\n"
+                    "📝 Type your UTR / Transaction ID\n\n"
+                    "We'll verify and activate your plan within 30 minutes.\n\n"
+                    "⏳ <i>Waiting for your proof...</i>"
+                )
+                await context.bot.send_message(
+                    chat_id=query.message.chat_id, text=text, parse_mode="HTML"
+                )
+                return
+
+    # ── NORMAL FLOW: Create pending order in per-bot DB ──
     order_id = await db.create_order(
         user_id=query.from_user.id, product_id=product_id
     )
@@ -192,6 +266,88 @@ async def handle_payment_proof(
         )
         return True
 
+    # ── SWIPE MODE: Route proof to OWNER_ID only ──
+    if context.user_data.get("is_swipe_purchase"):
+        bot_id = context.bot_data.get("bot_id", "")
+        main_db = context.bot_data.get("main_db")
+        if bot_id and main_db:
+            await main_db.update_swipe_order_proof(order_id, proof_data, proof_type, utr_text)
+            products_db_local = await get_products_db(context)
+            product = await products_db_local.get_product(
+                context.user_data.get("pending_product_id")
+            )
+
+            context.user_data["awaiting_proof"] = False
+            context.user_data.pop("pending_order_id", None)
+            context.user_data.pop("pending_product_id", None)
+            context.user_data.pop("is_swipe_purchase", None)
+
+            # Notify ONLY main bot owner
+            from config import OWNER_ID
+            safe_name = html.escape(user.first_name or 'Unknown')
+            safe_username = html.escape(user.username) if user.username else ''
+            safe_product_name = html.escape(product['name']) if product else 'VIP Plan'
+            safe_price = html.escape(format_price(product['price'])) if product else 'N/A'
+            bot_username = context.bot.username or bot_id
+
+            owner_text = (
+                f"🔔 <b>SWIPE MODE — New Payment Proof</b>\n\n"
+                f"🤖 Bot: @{html.escape(bot_username)}\n"
+                f"🔑 Bot ID: <code>{html.escape(bot_id)}</code>\n"
+                f"👤 User: {safe_name}"
+                f"{f' (@{safe_username})' if safe_username else ''}\n"
+                f"🆔 User ID: <code>{user.id}</code>\n"
+                f"📦 Plan: <b>{safe_product_name}</b>\n"
+                f"💰 Price: <b>{safe_price}</b>\n"
+                f"📋 Swipe Order: #{order_id}\n"
+                f"📝 Proof: {proof_type.upper()}"
+            )
+            keyboard = [[
+                InlineKeyboardButton(
+                    "✅ Approve", callback_data=f"swipe_approve_{order_id}",
+                    style="success",
+                ),
+                InlineKeyboardButton(
+                    "❌ Reject", callback_data=f"swipe_reject_{order_id}",
+                    style="danger",
+                ),
+            ]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+
+            try:
+                if proof_type in ("screenshot", "document"):
+                    if utr_text:
+                        owner_text += f"\n\n💬 UTR:\n<code>{html.escape(utr_text)}</code>"
+                    if proof_type == "screenshot":
+                        await context.bot.send_photo(
+                            chat_id=OWNER_ID, photo=proof_data,
+                            caption=owner_text, reply_markup=reply_markup,
+                            parse_mode="HTML",
+                        )
+                    else:
+                        await context.bot.send_document(
+                            chat_id=OWNER_ID, document=proof_data,
+                            caption=owner_text, reply_markup=reply_markup,
+                            parse_mode="HTML",
+                        )
+                else:
+                    owner_text += f"\n\n💬 UTR:\n<code>{html.escape(proof_data)}</code>"
+                    await context.bot.send_message(
+                        chat_id=OWNER_ID, text=owner_text,
+                        reply_markup=reply_markup, parse_mode="HTML",
+                    )
+            except Exception as e:
+                logger.warning(f"Failed to notify main owner about swipe order: {e}")
+
+            await update.message.reply_text(
+                "✅ <b>Payment proof received!</b>\n\n"
+                "⏳ Our team will verify and activate your plan within 30 minutes.\n"
+                "You'll receive a notification once approved. 🔔",
+                parse_mode="HTML",
+            )
+            return True
+
+    # ── NORMAL FLOW ──
     # Update order with proof in per-bot DB
     await db.update_order_proof(order_id, proof_data, proof_type, utr_text)
 
@@ -228,10 +384,12 @@ async def handle_payment_proof(
                     InlineKeyboardButton(
                         "✅ Approve",
                         callback_data=f"approve_{order_id}",
+                        style="success",
                     ),
                     InlineKeyboardButton(
                         "❌ Reject",
                         callback_data=f"reject_{order_id}",
+                        style="danger",
                     ),
                 ]
             ]
@@ -414,3 +572,148 @@ async def reject_callback(
             )
     except Exception:
         await query.answer("❌ Order rejected.", show_alert=True)
+
+
+# ═══════════════════════════════════════════════
+#  SWIPE MODE — Approve / Reject / QR Auto-Expiry
+# ═══════════════════════════════════════════════
+
+async def swipe_approve_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle swipe order approval — only OWNER_ID can approve."""
+    from config import OWNER_ID
+    query = update.callback_query
+    await query.answer()
+
+    if query.from_user.id != OWNER_ID:
+        return
+
+    order_id = int(query.data.split("_")[2])  # swipe_approve_123
+    main_db = context.bot_data.get("main_db") or context.bot_data.get("db")
+    order = await main_db.get_swipe_order(order_id)
+
+    if not order:
+        await query.answer("❌ Order not found.", show_alert=True)
+        return
+
+    if order["status"] != "pending":
+        await query.answer(f"⚠️ Order already {order['status']}.", show_alert=True)
+        return
+
+    await main_db.update_swipe_order_status(order_id, "approved", query.from_user.id)
+
+    # Get product for channel link
+    products_db = await get_products_db(context)
+    product = await products_db.get_product(order["product_id"])
+    channel_link = product.get("channel_link", "") if product else ""
+
+    try:
+        safe_prod = html.escape(order.get("product_name", "VIP Plan"))
+        user_text = (
+            f"🎉 <b>Congratulations!</b>\n\n"
+            f"✅ Your payment for <b>{safe_prod}</b> has been approved!\n\n"
+        )
+        if channel_link:
+            user_text += f"🔗 <b>Access your premium content here:</b>\n{html.escape(channel_link)}\n\n"
+        user_text += "Thank you for your purchase! Enjoy! 🌟"
+
+        await context.bot.send_message(
+            chat_id=order["user_id"], text=user_text, parse_mode="HTML",
+        )
+    except Exception as e:
+        logger.warning(f"Failed to send swipe approval to user {order['user_id']}: {e}")
+
+    try:
+        if query.message.caption:
+            await query.edit_message_caption(
+                caption=query.message.caption + "\n\n✅ <b>APPROVED</b> ✅",
+                parse_mode="HTML",
+            )
+        else:
+            await query.edit_message_text(
+                text=query.message.text + "\n\n✅ <b>APPROVED</b> ✅",
+                parse_mode="HTML",
+            )
+    except Exception:
+        await query.answer("✅ Swipe order approved!", show_alert=True)
+
+
+async def swipe_reject_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle swipe order rejection — only OWNER_ID can reject."""
+    from config import OWNER_ID
+    query = update.callback_query
+    await query.answer()
+
+    if query.from_user.id != OWNER_ID:
+        return
+
+    order_id = int(query.data.split("_")[2])  # swipe_reject_123
+    main_db = context.bot_data.get("main_db") or context.bot_data.get("db")
+    order = await main_db.get_swipe_order(order_id)
+
+    if not order:
+        await query.answer("❌ Order not found.", show_alert=True)
+        return
+
+    if order["status"] != "pending":
+        await query.answer(f"⚠️ Order already {order['status']}.", show_alert=True)
+        return
+
+    await main_db.update_swipe_order_status(order_id, "rejected", query.from_user.id)
+
+    try:
+        safe_prod = html.escape(order.get("product_name", "VIP Plan"))
+        await context.bot.send_message(
+            chat_id=order["user_id"],
+            text=(
+                f"❌ <b>Payment Rejected</b>\n\n"
+                f"Your payment for <b>{safe_prod}</b> could not be verified.\n\n"
+                f"If you believe this is an error, please try again or contact support."
+            ),
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        logger.warning(f"Failed to send swipe rejection to user {order['user_id']}: {e}")
+
+    try:
+        if query.message.caption:
+            await query.edit_message_caption(
+                caption=query.message.caption + "\n\n❌ <b>REJECTED</b> ❌",
+                parse_mode="HTML",
+            )
+        else:
+            await query.edit_message_text(
+                text=query.message.text + "\n\n❌ <b>REJECTED</b> ❌",
+                parse_mode="HTML",
+            )
+    except Exception:
+        await query.answer("❌ Swipe order rejected.", show_alert=True)
+
+
+async def _swipe_qr_auto_expire(context, chat_id, msg_id, product_id, bot_id, main_db):
+    """Background task: auto-delete swipe QR after 5 min or if mode turns OFF."""
+    try:
+        for _ in range(30):  # 30 × 10 sec = 5 min
+            await asyncio.sleep(10)
+            still_active = await main_db.is_swipe_mode_active(bot_id)
+            if not still_active:
+                break  # Mode turned OFF — remove QR immediately
+
+        # Delete QR message
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=msg_id)
+        except Exception:
+            pass
+
+        # Re-send Buy Now + Back buttons
+        keyboard = [
+            [InlineKeyboardButton("💰 Buy Now", callback_data=f"buy_{product_id}")],
+            [InlineKeyboardButton("🔙 Back", callback_data="back_to_products")],
+        ]
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="⏰ Payment window expired. Click Buy Now to try again.",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+    except Exception as e:
+        logger.warning(f"Swipe QR auto-expire error: {e}")
+

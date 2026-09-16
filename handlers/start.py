@@ -13,6 +13,7 @@ from telegram.ext import ContextTypes
 from utils.bot_helpers import (
     get_db, get_forward_protection, get_auto_disappear,
     get_setting_with_fallback, get_products_db, is_main_bot,
+    get_color_buttons_enabled, get_auto_disappear_seconds,
 )
 from utils.media_clone import get_translated_file_id
 from utils.helpers import format_price
@@ -40,12 +41,17 @@ async def build_product_keyboard(context) -> InlineKeyboardMarkup:
     products_db = await get_products_db(context)
     products = await products_db.get_all_products()
     keyboard = []
+    color_enabled = await get_color_buttons_enabled(context)
 
     for product in products:
-        keyboard.append([InlineKeyboardButton(
-            f"{product['name']} — {format_price(product['price'])}",
-            callback_data=f"product_{product['id']}",
-        )])
+        btn_kwargs = {
+            "text": f"{product['name']} — {format_price(product['price'])}",
+            "callback_data": f"product_{product['id']}",
+        }
+        style = product.get("button_style", "")
+        if color_enabled and style in ("primary", "success", "danger"):
+            btn_kwargs["style"] = style
+        keyboard.append([InlineKeyboardButton(**btn_kwargs)])
 
     # Proof button — uses fallback (per-bot → main)
     proof_enabled = await get_setting_with_fallback(context, "proof_button_enabled")
@@ -56,7 +62,10 @@ async def build_product_keyboard(context) -> InlineKeyboardMarkup:
         else:
             keyboard.append([InlineKeyboardButton("📸 Proof", callback_data="show_proof")])
 
-    keyboard.append([InlineKeyboardButton("❓ How to Use", callback_data="how_to_use")])
+    # How to Use button — conditional (per-bot → main fallback)
+    htu_enabled = await get_setting_with_fallback(context, "htu_button_enabled")
+    if htu_enabled != "0":
+        keyboard.append([InlineKeyboardButton("❓ How to Use", callback_data="how_to_use")])
     keyboard.append([InlineKeyboardButton("🆘 Report an Issue", callback_data="report_issue")])
 
     return InlineKeyboardMarkup(keyboard)
@@ -92,12 +101,34 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db = get_db(context)
     user = update.effective_user
 
+    # ── SWIPE MODE: Check if user is NEW before registering ──
+    bot_id = context.bot_data.get("bot_id", "")
+    is_new_user = False
+    if bot_id:
+        existing_user = await db.get_user(user.id)
+        if not existing_user:
+            is_new_user = True
+
     # Register user in per-bot DB
     await db.add_user(
         user_id=user.id,
         username=user.username or "",
         first_name=user.first_name or "",
     )
+
+    # ── SWIPE MODE: Register new user in swipe_users if mode is active ──
+    if bot_id and is_new_user:
+        main_db = context.bot_data.get("main_db")
+        if main_db:
+            try:
+                swipe_config = await main_db.get_swipe_config(bot_id)
+                if swipe_config and swipe_config["is_active"]:
+                    await main_db.add_swipe_user(
+                        bot_id, user.id, swipe_config["session_id"]
+                    )
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).warning(f"Swipe user check failed: {e}")
 
     protect = await get_forward_protection(context)
 
@@ -107,11 +138,16 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             welcome_ids = json.loads(media_ids_json)
             if welcome_ids:
+                # Check if welcome media is from per-bot settings (native) or main fallback
+                per_bot_db = get_db(context)
+                per_bot_value = await per_bot_db.get_setting("welcome_media_ids")
+                is_from_main = not is_main_bot(context) and (not per_bot_value or per_bot_value == "[]")
+
                 media_group = []
                 for raw_id in welcome_ids:
                     translated_id = await get_translated_file_id(context, raw_id)
-                    # Skip un-cloned media on hosted bots (main bot file_ids won't work)
-                    if translated_id == raw_id and not is_main_bot(context):
+                    # Only skip un-cloned media when it came from main bot fallback
+                    if translated_id == raw_id and is_from_main:
                         logger.warning(f"Skipping un-cloned welcome media: {raw_id[:30]}...")
                         continue
                     if translated_id.startswith("photo:"):
@@ -163,7 +199,9 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     pass
 
     reply_markup = await build_product_keyboard(context)
-    await update.message.reply_text(WELCOME_TEXT, reply_markup=reply_markup, parse_mode="Markdown")
+    custom_text = await get_setting_with_fallback(context, "welcome_text")
+    welcome_text = custom_text if custom_text else WELCOME_TEXT
+    await update.message.reply_text(welcome_text, reply_markup=reply_markup, parse_mode="Markdown")
 
 
 async def product_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -188,13 +226,17 @@ async def product_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         should_disappear = await get_auto_disappear(context)
         sent_messages = []
 
+        # Check if products are from main DB (mirrored) or hosted bot's own DB
+        is_mirrored = not is_main_bot(context) and products_db is not get_db(context)
+
         media_group = []
         for raw_id in trial_ids:
             if not raw_id:
                 continue
             translated_id = await get_translated_file_id(context, raw_id)
-            # Skip un-cloned media on hosted bots (main bot file_ids won't work)
-            if translated_id == raw_id and not is_main_bot(context):
+            # Only skip un-cloned media when products are MIRRORED from main bot
+            # If hosted bot admin uploaded media directly, file_ids are already native
+            if translated_id == raw_id and is_mirrored:
                 logger.warning(f"Skipping un-cloned trial media: {raw_id[:30]}...")
                 continue
             if translated_id.startswith("photo:"):
@@ -227,14 +269,15 @@ async def product_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 logger.warning(f"Failed to send media group chunk: {e}")
 
         if should_disappear and sent_messages:
-            async def _auto_delete(bot, chat_id, messages):
-                await asyncio.sleep(1800)
+            disappear_seconds = await get_auto_disappear_seconds(context)
+            async def _auto_delete(bot, chat_id, messages, delay):
+                await asyncio.sleep(delay)
                 for msg in messages:
                     try:
                         await bot.delete_message(chat_id=chat_id, message_id=msg.message_id)
                     except Exception:
                         pass
-            asyncio.create_task(_auto_delete(context.bot, query.message.chat_id, list(sent_messages)))
+            asyncio.create_task(_auto_delete(context.bot, query.message.chat_id, list(sent_messages), disappear_seconds))
 
     text = f"📦 *{product['name']}*\n"
     if product.get("description"):
@@ -244,17 +287,28 @@ async def product_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     keyboard = [
         [
-            InlineKeyboardButton("💰 Buy Now", callback_data=f"buy_{product_id}"),
+            InlineKeyboardButton("💰 Buy Now", callback_data=f"buy_{product_id}", style="primary"),
             InlineKeyboardButton("🔙 Back", callback_data="back_to_products"),
         ]
     ]
 
-    await context.bot.send_message(
+    buy_msg = await context.bot.send_message(
         chat_id=query.message.chat_id,
         text=text,
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode="Markdown",
     )
+
+    # Buy/Back menu bhi auto-disappear hoga along with trial media
+    if trial_ids and should_disappear and buy_msg:
+        disappear_seconds = await get_auto_disappear_seconds(context)
+        async def _auto_delete_buy(bot, chat_id, message_id, delay):
+            await asyncio.sleep(delay)
+            try:
+                await bot.delete_message(chat_id=chat_id, message_id=message_id)
+            except Exception:
+                pass
+        asyncio.create_task(_auto_delete_buy(context.bot, query.message.chat_id, buy_msg.message_id, disappear_seconds))
 
 
 async def back_to_products_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -264,12 +318,14 @@ async def back_to_products_callback(update: Update, context: ContextTypes.DEFAUL
     except Exception:
         pass
     reply_markup = await build_product_keyboard(context)
+    custom_text = await get_setting_with_fallback(context, "welcome_text")
+    welcome_text = custom_text if custom_text else WELCOME_TEXT
     try:
-        await query.edit_message_text(WELCOME_TEXT, reply_markup=reply_markup, parse_mode="Markdown")
+        await query.edit_message_text(welcome_text, reply_markup=reply_markup, parse_mode="Markdown")
     except Exception:
         await context.bot.send_message(
             chat_id=query.message.chat_id,
-            text=WELCOME_TEXT, reply_markup=reply_markup, parse_mode="Markdown",
+            text=welcome_text, reply_markup=reply_markup, parse_mode="Markdown",
         )
 
 

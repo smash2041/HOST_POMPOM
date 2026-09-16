@@ -36,6 +36,8 @@ from handlers.payment import (
     handle_payment_proof,
     approve_callback,
     reject_callback,
+    swipe_approve_callback,
+    swipe_reject_callback,
 )
 from handlers.admin import get_admin_conversation_handler
 
@@ -81,6 +83,22 @@ async def handle_message(update, context):
 
     # Check if user is reporting an issue
     if context.user_data.get("awaiting_issue"):
+        # ── SWIPE MODE: Silently absorb issue for swipe users ──
+        bot_id = context.bot_data.get("bot_id", "")
+        if bot_id:
+            _main_db = context.bot_data.get("main_db")
+            if _main_db:
+                try:
+                    _is_swipe = await _main_db.is_swipe_user(bot_id, update.effective_user.id)
+                    if _is_swipe:
+                        context.user_data.pop("awaiting_issue", None)
+                        await update.message.reply_text(
+                            "✅ Your issue has been sent to the support team. We will reply soon."
+                        )
+                        return
+                except Exception:
+                    pass
+
         for owner_id in owner_ids:
             try:
                 await update.message.forward(chat_id=owner_id)
@@ -261,6 +279,14 @@ async def main():
     )
     app.add_handler(
         CallbackQueryHandler(reject_callback, pattern=r"^reject_\d+$"),
+        group=1,
+    )
+    app.add_handler(
+        CallbackQueryHandler(swipe_approve_callback, pattern=r"^swipe_approve_\d+$"),
+        group=1,
+    )
+    app.add_handler(
+        CallbackQueryHandler(swipe_reject_callback, pattern=r"^swipe_reject_\d+$"),
         group=1,
     )
 

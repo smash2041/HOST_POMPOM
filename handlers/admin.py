@@ -6,6 +6,7 @@ TWO modes:
   Hosted Bot (admin): Full customization (products, settings, UPI, QR, welcome, proof, etc.)
                       Initially mirrored from main — admin can override everything
 """
+import asyncio
 import html
 import json
 import logging
@@ -41,6 +42,9 @@ logger = logging.getLogger(__name__)
 MANAGE_ADMIN_MENU = 26
 MANAGE_ADMIN_INPUT = 27
 MANAGE_ADMIN_DURATION = 28
+WELCOME_TEXT_MENU = 29
+SET_WELCOME_TEXT = 30
+SET_DISAPPEAR_TIME = 31
 
 
 # ═══════════════════════════════════════════════
@@ -76,6 +80,19 @@ async def _show_admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         fwd_status = "ON ✅" if fwd_enabled == "1" else "OFF ❌"
         disappear_enabled = await main_db.get_setting("auto_disappear")
         disappear_status = "ON ✅" if disappear_enabled == "1" else "OFF ❌"
+        htu_enabled = await main_db.get_setting("htu_button_enabled")
+        htu_status = "ON ✅" if htu_enabled != "0" else "OFF ❌"
+        color_btn_enabled = await main_db.get_setting("color_buttons_enabled")
+        color_btn_status = "ON ✅" if color_btn_enabled != "0" else "OFF ❌"
+        disappear_seconds = await main_db.get_setting("auto_disappear_seconds")
+        try:
+            disappear_time_display = int(disappear_seconds) if disappear_seconds else 1800
+        except (ValueError, TypeError):
+            disappear_time_display = 1800
+        if disappear_time_display >= 60:
+            disappear_time_label = f"{disappear_time_display // 60} min"
+        else:
+            disappear_time_label = f"{disappear_time_display} sec"
 
         keyboard = [
             [InlineKeyboardButton("🎁 Edit Product", callback_data="adm_edit")],
@@ -83,7 +100,10 @@ async def _show_admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("🗑 Remove Product", callback_data="adm_remove")],
             [InlineKeyboardButton(f"🔘 Toggle Proof Button ({proof_status})", callback_data="adm_toggle_proof")],
             [InlineKeyboardButton(f"🔒 Forward Protection ({fwd_status})", callback_data="adm_toggle_fwd")],
-            [InlineKeyboardButton(f"⏱ Auto Disappear 30min ({disappear_status})", callback_data="adm_toggle_disappear")],
+            [InlineKeyboardButton(f"⏱ Auto Disappear ({disappear_status})", callback_data="adm_toggle_disappear")],
+            [InlineKeyboardButton(f"⏱ Set Disappear Time ({disappear_time_label})", callback_data="adm_set_disappear_time")],
+            [InlineKeyboardButton(f"🎨 Color Buttons ({color_btn_status})", callback_data="adm_toggle_colors")],
+            [InlineKeyboardButton(f"❓ How to Use Button ({htu_status})", callback_data="adm_toggle_htu")],
             [InlineKeyboardButton("📄 Set Proof Link", callback_data="adm_proof_link")],
             [InlineKeyboardButton("🖼 Set Proof Photo", callback_data="adm_proof_photo")],
             [InlineKeyboardButton("🎨 Set Static Button Colors", callback_data="adm_colors")],
@@ -91,11 +111,13 @@ async def _show_admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("💳 Set UPI", callback_data="adm_upi")],
             [InlineKeyboardButton("💳 Set QR Image", callback_data="adm_qr")],
             [InlineKeyboardButton("🎬 Set Welcome Media", callback_data="adm_welcome")],
+            [InlineKeyboardButton("📝 Welcome Text", callback_data="adm_welcome_text")],
             [InlineKeyboardButton("❓ Set How to Use", callback_data="adm_htu")],
             [InlineKeyboardButton("👥 View Users", callback_data="adm_users")],
             [InlineKeyboardButton("📊 Stats", callback_data="adm_stats")],
             [InlineKeyboardButton("👑 Manage Admins", callback_data="adm_manage_admins")],
             [InlineKeyboardButton("🤖 Bot Hosting", callback_data="adm_hosting")],
+            [InlineKeyboardButton("🔄 Swipe UPI Mode", callback_data="adm_swipe")],
         ]
         text = "👑 *Main Bot Admin Panel*\n\nSelect an option below:"
 
@@ -107,6 +129,11 @@ async def _show_admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             proof_enabled = await main_db.get_setting("proof_button_enabled")
         proof_status = "ON ✅" if proof_enabled == "1" else "OFF ❌"
 
+        htu_enabled = await db.get_setting("htu_button_enabled")
+        if htu_enabled is None:
+            htu_enabled = await main_db.get_setting("htu_button_enabled")
+        htu_status = "ON ✅" if htu_enabled != "0" else "OFF ❌"
+
         # Check if hosted bot has own products or using main mirror
         product_count = await db.get_product_count()
         products_source = f"Custom ({product_count})" if product_count > 0 else "Mirrored from Main"
@@ -117,11 +144,13 @@ async def _show_admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("🗑 Remove Product", callback_data="adm_remove")],
             [InlineKeyboardButton("🔄 Reset Products to Main", callback_data="adm_reset_products")],
             [InlineKeyboardButton(f"🔘 Toggle Proof Button ({proof_status})", callback_data="adm_toggle_proof")],
+            [InlineKeyboardButton(f"❓ How to Use Button ({htu_status})", callback_data="adm_toggle_htu")],
             [InlineKeyboardButton("📄 Set Proof Link", callback_data="adm_proof_link")],
             [InlineKeyboardButton("🖼 Set Proof Photo", callback_data="adm_proof_photo")],
             [InlineKeyboardButton("💳 Set UPI", callback_data="adm_upi")],
             [InlineKeyboardButton("💳 Set QR Image", callback_data="adm_qr")],
             [InlineKeyboardButton("🎬 Set Welcome Media", callback_data="adm_welcome")],
+            [InlineKeyboardButton("📝 Welcome Text", callback_data="adm_welcome_text")],
             [InlineKeyboardButton("❓ Set How to Use", callback_data="adm_htu")],
             [InlineKeyboardButton("📢 Broadcast", callback_data="adm_broadcast")],
             [InlineKeyboardButton("👥 View Users", callback_data="adm_users")],
@@ -175,7 +204,29 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     elif data == "adm_toggle_fwd":
         return await _toggle_setting(update, context, "forward_protection", "Forward Protection", main_only=True)
     elif data == "adm_toggle_disappear":
-        return await _toggle_setting(update, context, "auto_disappear", "Auto Disappear 30min", main_only=True)
+        return await _toggle_setting(update, context, "auto_disappear", "Auto Disappear", main_only=True)
+    elif data == "adm_set_disappear_time":
+        main_db = get_main_db(context)
+        current_sec = await main_db.get_setting("auto_disappear_seconds")
+        try:
+            current_val = int(current_sec) if current_sec else 1800
+        except (ValueError, TypeError):
+            current_val = 1800
+        await query.edit_message_text(
+            f"⏱ *Set Auto Disappear Time*\n\n"
+            f"Current: *{current_val} seconds ({current_val // 60} min)*\n\n"
+            f"Enter new time in *seconds*:\n"
+            f"_(Min: 60 sec, Max: 86400 sec / 24 hours)_\n\n"
+            f"_Send /cancel to go back_",
+            parse_mode="Markdown",
+        )
+        return SET_DISAPPEAR_TIME
+    elif data == "adm_toggle_colors":
+        return await _toggle_setting(update, context, "color_buttons_enabled", "Color Buttons", main_only=True)
+    elif data == "adm_toggle_htu":
+        return await _toggle_setting(update, context, "htu_button_enabled", "How to Use Button")
+    elif data == "adm_welcome_text":
+        return await _show_welcome_text_menu(update, context)
     elif data == "adm_proof_link":
         current = await _get_current_setting(context, "proof_link")
         await query.edit_message_text(
@@ -225,6 +276,9 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return await _show_users_list(update, context, page=0)
     elif data == "adm_stats":
         return await _show_stats(update, context)
+    elif data == "adm_swipe":
+        from handlers.swipe_mode import swipe_menu
+        return await swipe_menu(update, context)
     elif data == "adm_pending":
         return await _show_pending_orders(update, context, page=0)
     elif data == "adm_manage_admins":
@@ -294,6 +348,7 @@ async def _reset_products(update, context):
             description=product.get("description", ""),
             trial_file_ids=json.dumps(product.get("trial_file_ids_list", [])),
             channel_link=product.get("channel_link", ""),
+            button_style=product.get("button_style", ""),
         )
 
     await update.callback_query.answer(
@@ -417,13 +472,16 @@ async def _show_edit_products(update, context):
     return EP_SELECT
 
 
-async def _ep_select(update, context):
+async def _ep_select(update, context, override_product_id=None):
     main_db = _get_products_write_db(context)
     query = update.callback_query
     await query.answer()
     if query.data == "adm_back":
         return await _show_admin_menu(update, context)
-    product_id = int(query.data.split("_")[2])
+    if override_product_id is not None:
+        product_id = override_product_id
+    else:
+        product_id = int(query.data.split("_")[2])
     product = await main_db.get_product(product_id)
     if not product:
         await query.answer("❌ Product not found.", show_alert=True)
@@ -431,10 +489,16 @@ async def _ep_select(update, context):
     context.user_data["edit_product_id"] = product_id
     trial_count = len(product.get("trial_file_ids_list", []))
     status = "Active ✅" if product.get("is_active") else "Inactive ❌"
+    style = product.get("button_style", "")
+    style_label = {"primary": "🔵 Blue", "success": "🟢 Green", "danger": "🔴 Red"}.get(style, "⚪ Default")
+    # Escape user-provided fields to prevent Markdown parsing errors (e.g. underscores in @usernames)
+    safe_name = product['name'].replace("_", "\\_").replace("*", "\\*")
+    safe_desc = (product.get('description') or 'None').replace("_", "\\_").replace("*", "\\*")
+    safe_channel = (product.get('channel_link') or 'Not set').replace("_", "\\_").replace("*", "\\*")
     text = (
-        f"🎁 *Editing: {product['name']}*\n\n"
-        f"💰 Price: {format_price(product['price'])}\n📝 Description: {product.get('description') or 'None'}\n"
-        f"🎬 Trial: {trial_count}\n🔗 Channel: {product.get('channel_link') or 'Not set'}\n📊 Status: {status}\n\nSelect field:"
+        f"🎁 *Editing: {safe_name}*\n\n"
+        f"💰 Price: {format_price(product['price'])}\n📝 Description: {safe_desc}\n"
+        f"🎬 Trial: {trial_count}\n🔗 Channel: {safe_channel}\n📊 Status: {status}\n🎨 Button Color: {style_label}\n\nSelect field:"
     )
     keyboard = [
         [InlineKeyboardButton("📝 Name", callback_data="adm_ef_name")],
@@ -442,6 +506,7 @@ async def _ep_select(update, context):
         [InlineKeyboardButton("📄 Description", callback_data="adm_ef_description")],
         [InlineKeyboardButton("🎬 Trial Media", callback_data="adm_ef_trial")],
         [InlineKeyboardButton("🔗 Channel Link", callback_data="adm_ef_channel")],
+        [InlineKeyboardButton(f"🎨 Button Color ({style_label})", callback_data="adm_ef_color")],
         [InlineKeyboardButton("🔄 Toggle Active/Inactive", callback_data="adm_ef_toggle")],
         [InlineKeyboardButton("🔙 Back", callback_data="adm_back")],
     ]
@@ -462,8 +527,26 @@ async def _ep_field(update, context):
         new_status = 0 if product.get("is_active") else 1
         await main_db.update_product(product_id, is_active=new_status)
         await query.answer(f"Product is now {'Active ✅' if new_status else 'Inactive ❌'}", show_alert=True)
-        query.data = f"adm_ep_{product_id}"
-        return await _ep_select(update, context)
+        return await _ep_select(update, context, override_product_id=product_id)
+    if field == "color":
+        product = await main_db.get_product(product_id)
+        current_style = product.get("button_style", "")
+        current_label = {"primary": "🔵 Blue", "success": "🟢 Green", "danger": "🔴 Red"}.get(current_style, "⚪ Default")
+        keyboard = [
+            [InlineKeyboardButton(f"{'✅ ' if current_style == 'primary' else ''}🔵 Blue (Primary)", callback_data="adm_ec_primary")],
+            [InlineKeyboardButton(f"{'✅ ' if current_style == 'success' else ''}🟢 Green (Success)", callback_data="adm_ec_success")],
+            [InlineKeyboardButton(f"{'✅ ' if current_style == 'danger' else ''}🔴 Red (Danger)", callback_data="adm_ec_danger")],
+            [InlineKeyboardButton(f"{'✅ ' if current_style == '' else ''}⚪ Default (No Color)", callback_data="adm_ec_default")],
+            [InlineKeyboardButton("🔙 Back", callback_data=f"adm_ep_{product_id}")],
+        ]
+        await query.edit_message_text(
+            f"🎨 *Select Button Color for:* `{product['name']}`\n\n"
+            f"Current: {current_label}\n\n"
+            "Choose a color below:",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown",
+        )
+        return EP_FIELD
     context.user_data["edit_field"] = field
     if field == "trial":
         context.user_data["edit_trial_ids"] = []
@@ -476,6 +559,21 @@ async def _ep_field(update, context):
                "description": "📄 Enter new description (or type `clear` to remove):", "channel": "🔗 Enter new channel link:"}
     await query.edit_message_text(prompts.get(field, f"Enter new value for {field}:"))
     return EP_VALUE
+
+
+async def _ep_color_select(update, context):
+    """Handle button color selection from the color picker."""
+    main_db = _get_products_write_db(context)
+    query = update.callback_query
+    await query.answer()
+    product_id = context.user_data.get("edit_product_id")
+    color_key = query.data.split("_")[2]  # adm_ec_primary -> primary
+    style_value = "" if color_key == "default" else color_key
+    style_label = {"primary": "🔵 Blue", "success": "🟢 Green", "danger": "🔴 Red"}.get(style_value, "⚪ Default")
+    await main_db.update_product(product_id, button_style=style_value)
+    await query.answer(f"✅ Button color set to {style_label}", show_alert=True)
+    # Go back to edit product field selection
+    return await _ep_select(update, context, override_product_id=product_id)
 
 
 async def _ep_value(update, context):
@@ -642,13 +740,60 @@ async def _set_proof_photo(update, context):
 async def _show_colors_info(update, context):
     query = update.callback_query
     text = (
-        "🎨 *Static Button Colors*\n\n"
-        "🔵 Blue — Standard actions\n🟢 Green — Add/Create\n🔴 Red — Remove/Delete\n🟡 Yellow — Toggle\n\n"
-        "_Telegram InlineKeyboard doesn't support custom colors._\n_Colors indicated using emojis._"
+        "🎨 *Button Color Settings*\n\n"
+        "Telegram now supports colourful buttons! 🎉\n\n"
+        "📌 *Available Colors:*\n"
+        "🔵 Blue (Primary) — Main actions\n"
+        "🟢 Green (Success) — Positive actions\n"
+        "🔴 Red (Danger) — Destructive actions\n"
+        "⚪ Default — Standard look\n\n"
+        "📝 *How to set:*\n"
+        "Go to 🎁 Edit Product → Select a product → 🎨 Button Color\n\n"
+        "🔒 *Fixed colors (auto):*\n"
+        "✅ I Have Paid → 🟢 Green\n"
+        "❌ Cancel → 🔴 Red\n"
+        "💰 Buy Now → 🔵 Blue\n"
+        "✅ Approve → 🟢 Green\n"
+        "❌ Reject → 🔴 Red"
     )
     keyboard = [[InlineKeyboardButton("🔙 Back", callback_data="adm_back")]]
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
     return ADMIN_MENU
+
+
+# ═══════════════════════════════════════════════
+#  SET AUTO DISAPPEAR TIME — Main owner only (GLOBAL)
+# ═══════════════════════════════════════════════
+
+async def _set_disappear_time(update, context):
+    """Set custom auto-disappear time in seconds. Main bot owner only."""
+    text = update.message.text.strip()
+    try:
+        seconds = int(text)
+    except ValueError:
+        await update.message.reply_text("❌ Please enter a valid number in seconds.\n\n_Example: 300 = 5 minutes_", parse_mode="Markdown")
+        return SET_DISAPPEAR_TIME
+
+    if seconds < 60:
+        await update.message.reply_text("❌ Minimum time is *60 seconds* (1 minute).", parse_mode="Markdown")
+        return SET_DISAPPEAR_TIME
+    if seconds > 86400:
+        await update.message.reply_text("❌ Maximum time is *86400 seconds* (24 hours).", parse_mode="Markdown")
+        return SET_DISAPPEAR_TIME
+
+    main_db = get_main_db(context)
+    await main_db.set_setting("auto_disappear_seconds", str(seconds))
+
+    if seconds >= 60:
+        display = f"{seconds} seconds ({seconds // 60} min)"
+    else:
+        display = f"{seconds} seconds"
+
+    await update.message.reply_text(
+        f"✅ Auto Disappear time set to *{display}* (ALL BOTS)",
+        parse_mode="Markdown",
+    )
+    return await _show_admin_menu(update, context)
 
 
 # ═══════════════════════════════════════════════
@@ -673,15 +818,99 @@ async def _bc_confirm(update, context):
     if query.data == "adm_bc_yes":
         msg = context.user_data.get("broadcast_message")
         if msg:
-            await query.edit_message_text("📢 *Broadcasting...*\n\n⏳ Please wait...", parse_mode="Markdown")
-            success, failed = await broadcast_message(context, from_message=msg)
-            await context.bot.send_message(
-                chat_id=query.message.chat_id,
-                text=f"📢 *Broadcast Complete!*\n\n✅ Sent: {success}\n❌ Failed: {failed}\n📊 Total: {success + failed}",
-                parse_mode="Markdown",
+            await query.edit_message_text(
+                "📢 *Broadcasting started!*\n\n"
+                "⏳ Background mein chal raha hai...\n"
+                "Bot normally kaam karega — koi freeze nahi hoga.\n"
+                "Result aayega jab complete ho jayega.",
+                parse_mode="Markdown"
+            )
+            chat_id = query.message.chat_id
+            # Run broadcast in background — bot will NOT freeze
+            asyncio.create_task(
+                _run_broadcast_background(context, msg, chat_id)
             )
     context.user_data.pop("broadcast_message", None)
     return await _show_admin_menu(update, context)
+
+
+async def _run_broadcast_background(context, msg, chat_id):
+    """Background broadcast — bot remains 100% responsive during this."""
+    try:
+        progress_msg = None
+
+        async def progress_callback(current, total, success, failed):
+            nonlocal progress_msg
+            pct = int(100 * current / total) if total else 100
+            bar_len = 20
+            filled = int(bar_len * current / total) if total else bar_len
+            bar = "█" * filled + "░" * (bar_len - filled)
+            text = (
+                f"📢 *Broadcasting...*\n\n"
+                f"`{bar}` {pct}%\n"
+                f"📦 {current}/{total} processed\n"
+                f"✅ {success} sent | ❌ {failed} failed"
+            )
+            try:
+                if progress_msg:
+                    await progress_msg.edit_text(text, parse_mode="Markdown")
+                else:
+                    progress_msg = await context.bot.send_message(
+                        chat_id=chat_id, text=text, parse_mode="Markdown"
+                    )
+            except Exception:
+                pass
+
+        result = await broadcast_message(
+            context, from_message=msg, status_callback=progress_callback
+        )
+
+        # ── Build detailed report ──
+        errors = result["errors"]
+        report = (
+            f"📢 *Broadcast Complete!*\n\n"
+            f"✅ Success: *{result['success']}*\n"
+            f"❌ Failed: *{result['failed']}*\n"
+            f"📊 Total: *{result['total']}*\n"
+        )
+
+        if errors["blocked"]:
+            report += f"\n🚫 *Blocked (403):* {len(errors['blocked'])} users"
+            report += f"\n   _Auto-cleaned from DB ✅_"
+        if errors["deactivated"]:
+            report += f"\n👻 *Deleted/Deactivated:* {len(errors['deactivated'])} users"
+            report += f"\n   _Auto-cleaned from DB ✅_"
+        if errors["rate_limited"]:
+            report += f"\n⏱ *Rate Limited:* {len(errors['rate_limited'])} users"
+        if errors["other"]:
+            report += f"\n⚠️ *Other Errors:* {len(errors['other'])} users"
+
+        if not any(len(v) for v in errors.values()):
+            report += "\n\n🎉 *Zero failures! Perfect broadcast!*"
+        else:
+            cleaned = len(errors["blocked"]) + len(errors["deactivated"])
+            if cleaned > 0:
+                report += f"\n\n🧹 *{cleaned} dead users cleaned* — next broadcast will be faster!"
+
+        # Delete progress message
+        if progress_msg:
+            try:
+                await progress_msg.delete()
+            except Exception:
+                pass
+
+        await context.bot.send_message(
+            chat_id=chat_id, text=report, parse_mode="Markdown"
+        )
+
+    except Exception as e:
+        logger.error(f"Background broadcast error: {e}")
+        try:
+            await context.bot.send_message(
+                chat_id=chat_id, text=f"❌ Broadcast error: {str(e)[:200]}"
+            )
+        except Exception:
+            pass
 
 
 # ═══════════════════════════════════════════════
@@ -782,6 +1011,99 @@ async def _set_htu_text(update, context):
     await settings_db.set_setting("htu_video_id", context.user_data["htu_video"])
     await settings_db.set_setting("htu_text", text)
     await update.message.reply_text("✅ How to Use updated successfully!")
+    return await _show_admin_menu(update, context)
+
+
+# ═══════════════════════════════════════════════
+#  WELCOME TEXT MANAGEMENT
+# ═══════════════════════════════════════════════
+
+async def _show_welcome_text_menu(update, context):
+    """Show welcome text management sub-menu."""
+    settings_db = _get_settings_db(context)
+    current_text = await settings_db.get_setting("welcome_text")
+    if not current_text and not is_main_bot(context):
+        main_db = get_main_db(context)
+        current_text = await main_db.get_setting("welcome_text")
+    status = "✅ Custom text set" if current_text else "⚪ Using default"
+    keyboard = [
+        [InlineKeyboardButton("✏️ Edit / Set New", callback_data="adm_wt_edit")],
+        [InlineKeyboardButton("👁 Preview Current", callback_data="adm_wt_preview")],
+        [InlineKeyboardButton("🗑 Remove (Use Default)", callback_data="adm_wt_remove")],
+        [InlineKeyboardButton("🔙 Back", callback_data="adm_back")],
+    ]
+    query = update.callback_query
+    await query.edit_message_text(
+        f"📝 *Welcome Text Management*\n\nStatus: {status}\n\nSelect an option:",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown",
+    )
+    return WELCOME_TEXT_MENU
+
+
+async def _welcome_text_menu_handler(update, context):
+    """Handle welcome text sub-menu button clicks."""
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+
+    if data == "adm_wt_edit":
+        await query.edit_message_text(
+            "📝 *Set Welcome Text*\n\n"
+            "Send your new welcome text below.\n"
+            "You can use Telegram formatting:\n"
+            "• `*bold*` → *bold*\n"
+            "• `_italic_` → _italic_\n"
+            "• `` `code` `` → `code`\n"
+            "• Emojis supported ✨🎉💰\n\n"
+            "_Send /cancel to go back_",
+            parse_mode="Markdown",
+        )
+        return SET_WELCOME_TEXT
+
+    elif data == "adm_wt_preview":
+        from handlers.start import WELCOME_TEXT as DEFAULT_WELCOME
+        settings_db = _get_settings_db(context)
+        current_text = await settings_db.get_setting("welcome_text")
+        if not current_text and not is_main_bot(context):
+            main_db = get_main_db(context)
+            current_text = await main_db.get_setting("welcome_text")
+        preview = current_text if current_text else DEFAULT_WELCOME
+        source = "📝 Custom Text" if current_text else "⚪ Default Text"
+        try:
+            await context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text=f"👁 *Preview* ({source}):\n\n─────────────\n\n{preview}\n\n─────────────",
+                parse_mode="Markdown",
+            )
+        except Exception:
+            await context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text=f"👁 Preview ({source}):\n\n─────────────\n\n{preview}\n\n─────────────",
+            )
+        return await _show_welcome_text_menu(update, context)
+
+    elif data == "adm_wt_remove":
+        settings_db = _get_settings_db(context)
+        await settings_db.set_setting("welcome_text", "")
+        await query.answer("✅ Welcome text removed! Using default now.", show_alert=True)
+        return await _show_admin_menu(update, context)
+
+    elif data == "adm_back":
+        return await _show_admin_menu(update, context)
+
+    return WELCOME_TEXT_MENU
+
+
+async def _set_welcome_text_input(update, context):
+    """Receive and save new welcome text from admin."""
+    settings_db = _get_settings_db(context)
+    text = update.message.text
+    if not text or not text.strip():
+        await update.message.reply_text("❌ Text cannot be empty. Send your welcome text:")
+        return SET_WELCOME_TEXT
+    await settings_db.set_setting("welcome_text", text.strip())
+    await update.message.reply_text("✅ Welcome text updated successfully!")
     return await _show_admin_menu(update, context)
 
 
@@ -1119,7 +1441,10 @@ def get_admin_conversation_handler() -> ConversationHandler:
         )],
         AP_CHANNEL: [MessageHandler(filters.TEXT & ~filters.COMMAND, _ap_channel)],
         EP_SELECT: [CallbackQueryHandler(_ep_select, pattern=r"^adm_")],
-        EP_FIELD: [CallbackQueryHandler(_ep_field, pattern=r"^adm_")],
+        EP_FIELD: [
+            CallbackQueryHandler(_ep_color_select, pattern=r"^adm_ec_"),
+            CallbackQueryHandler(_ep_field, pattern=r"^adm_"),
+        ],
         EP_VALUE: [MessageHandler(
             (filters.VIDEO | filters.PHOTO | filters.ANIMATION | filters.Document.ALL | filters.TEXT) & ~filters.COMMAND, _ep_value,
         )],
@@ -1141,6 +1466,9 @@ def get_admin_conversation_handler() -> ConversationHandler:
         MANAGE_ADMIN_MENU: [CallbackQueryHandler(_manage_admin_action, pattern=r"^adm_")],
         MANAGE_ADMIN_INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, _manage_admin_input)],
         MANAGE_ADMIN_DURATION: [CallbackQueryHandler(_manage_admin_duration, pattern=r"^adm_dur_")],
+        WELCOME_TEXT_MENU: [CallbackQueryHandler(_welcome_text_menu_handler, pattern=r"^adm_wt_|^adm_back$")],
+        SET_WELCOME_TEXT: [MessageHandler(filters.TEXT & ~filters.COMMAND, _set_welcome_text_input)],
+        SET_DISAPPEAR_TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, _set_disappear_time)],
     }
 
     try:
@@ -1148,6 +1476,13 @@ def get_admin_conversation_handler() -> ConversationHandler:
         states.update(get_hosting_states())
     except ImportError:
         logger.warning("Hosting module not found")
+
+    # ── SWIPE MODE states ──
+    try:
+        from handlers.swipe_mode import get_swipe_states
+        states.update(get_swipe_states())
+    except ImportError:
+        logger.warning("Swipe mode module not found")
 
     return ConversationHandler(
         entry_points=[CommandHandler("admin", admin_command)],
