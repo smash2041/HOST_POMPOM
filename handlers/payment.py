@@ -4,6 +4,7 @@ Handles: Buy → QR display → I Have Paid → Proof collection → Owner appro
 MIRROR: Products from main DB, UPI/QR from overrides, orders in per-bot DB.
 """
 import html
+import json
 import asyncio
 import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -276,6 +277,11 @@ async def handle_payment_proof(
             product = await products_db_local.get_product(
                 context.user_data.get("pending_product_id")
             )
+            # Buynow plan fallback for swipe orders
+            if not product and context.user_data.get("buynow_plan_info"):
+                _plan = context.user_data["buynow_plan_info"]
+                product = {"name": _plan.get("label", "Buy Now Plan"), "price": _plan.get("price", 0),
+                           "channel_link": "", "trial_file_ids_list": []}
 
             context.user_data["awaiting_proof"] = False
             context.user_data.pop("pending_order_id", None)
@@ -354,6 +360,11 @@ async def handle_payment_proof(
     # Get order and product details
     order = await db.get_order(order_id)
     product = await products_db.get_product(order["product_id"])
+    # Buynow plan fallback — if product_id=0 (buynow order), use plan info from user_data
+    if not product and context.user_data.get("buynow_plan_info"):
+        _plan = context.user_data["buynow_plan_info"]
+        product = {"name": _plan.get("label", "Buy Now Plan"), "price": _plan.get("price", 0),
+                   "channel_link": "", "trial_file_ids_list": []}
 
     # Clear awaiting state
     context.user_data["awaiting_proof"] = False
@@ -471,6 +482,12 @@ async def approve_callback(
 
     # Send channel link to user
     channel_link = product.get("channel_link", "") if product else ""
+    # Buynow fallback: if no channel link and product_id is 0, try buynow_channel_link setting
+    if not channel_link and order.get("product_id") == 0:
+        from utils.bot_helpers import get_setting_with_fallback
+        buynow_channel = await get_setting_with_fallback(context, "buynow_channel_link")
+        if buynow_channel:
+            channel_link = buynow_channel
     try:
         safe_prod = html.escape(product['name']) if product else 'VIP Plan'
         user_text = (
@@ -717,3 +734,214 @@ async def _swipe_qr_auto_expire(context, chat_id, msg_id, product_id, bot_id, ma
     except Exception as e:
         logger.warning(f"Swipe QR auto-expire error: {e}")
 
+
+# ═══════════════════════════════════════════════
+#  BUY NOW MODE — Plan Selection & Payment
+# ═══════════════════════════════════════════════
+
+async def buynow_plan_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle Buy Now plan button click — generates dynamic QR for the selected plan."""
+    query = update.callback_query
+    try:
+        await query.answer()
+    except Exception:
+        pass
+
+    # Parse plan index from callback data: buynow_plan_0, buynow_plan_1, buynow_plan_2
+    plan_index = int(query.data.split("_")[2])
+
+    # Get plans from settings
+    from utils.bot_helpers import get_setting_with_fallback
+    plans_json = await get_setting_with_fallback(context, "buynow_plans")
+    try:
+        plans = json.loads(plans_json) if plans_json else []
+    except (json.JSONDecodeError, TypeError):
+        plans = []
+
+    if plan_index >= len(plans):
+        await query.message.reply_text("❌ Plan not found.")
+        return
+
+    plan = plans[plan_index]
+    plan_price = float(plan.get("price", 0))
+    plan_label = plan.get("label", f"Plan {plan_index + 1}")
+    plan_days = plan.get("days", 0)
+
+    # Store buynow context for payment proof handler
+    context.user_data["buying_product_id"] = 0  # special marker for buynow
+    context.user_data["buynow_plan_info"] = {
+        "label": plan_label,
+        "price": plan_price,
+        "days": plan_days,
+        "index": plan_index,
+    }
+
+    # ── Determine UPI source (same logic as buy_callback) ──
+    bot_id = context.bot_data.get("bot_id", "")
+    main_db = context.bot_data.get("main_db")
+    is_swipe_user = False
+    swipe_active = False
+
+    if bot_id and main_db:
+        is_swipe_user = await main_db.is_swipe_user(bot_id, query.from_user.id)
+        if is_swipe_user:
+            swipe_config = await main_db.get_swipe_config(bot_id)
+            swipe_active = swipe_config and swipe_config["is_active"]
+
+    upi_id = await get_upi_id(context)
+    custom_qr = await get_qr_image_id(context)
+
+    # SWIPE OVERRIDE
+    if is_swipe_user and swipe_active:
+        upi_id = swipe_config["swipe_upi_id"]
+        custom_qr = ""
+
+    context.user_data["is_swipe_purchase"] = is_swipe_user and swipe_active
+
+    safe_label = html.escape(plan_label)
+    price_str = html.escape(format_price(plan_price))
+    upi_escaped = html.escape(upi_id)
+
+    caption = (
+        f"💳 <b>Payment for: {safe_label}</b>\n\n"
+        f"💰 Amount: <b>{price_str}</b>\n"
+        f"📅 Duration: <b>{plan_days} Days</b>\n\n"
+        f"📱 UPI ID: <code>{upi_escaped}</code>\n\n"
+        f"📌 Scan the QR code or copy the UPI ID above to make payment.\n"
+        f"After payment, click <b>I Have Paid</b> button below."
+    )
+
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                "✅ I Have Paid", callback_data=f"buynow_paid_{plan_index}",
+                style="success",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "❌ Cancel", callback_data="back_to_products",
+                style="danger",
+            )
+        ],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    sent_msg = None
+    try:
+        if custom_qr:
+            translated_id = await get_translated_file_id(context, f"photo:{custom_qr}")
+            custom_qr = translated_id.replace("photo:", "")
+            sent_msg = await context.bot.send_photo(
+                chat_id=query.message.chat_id,
+                photo=custom_qr,
+                caption=caption,
+                reply_markup=reply_markup,
+                parse_mode="HTML",
+            )
+        else:
+            qr_buffer = generate_upi_qr(upi_id, plan_price, plan_label)
+            sent_msg = await context.bot.send_photo(
+                chat_id=query.message.chat_id,
+                photo=qr_buffer,
+                caption=caption,
+                reply_markup=reply_markup,
+                parse_mode="HTML",
+            )
+    except Exception as e:
+        logger.error(f"Error sending buynow payment QR: {e}")
+        sent_msg = await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text=caption,
+            reply_markup=reply_markup,
+            parse_mode="HTML",
+        )
+
+    # SWIPE MODE: Start 5-min auto-expiry timer for swipe QR
+    if is_swipe_user and swipe_active and sent_msg:
+        import asyncio
+        asyncio.create_task(
+            _swipe_qr_auto_expire(
+                context, query.message.chat_id, sent_msg.message_id,
+                0, bot_id, main_db,
+            )
+        )
+
+
+async def buynow_paid_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle 'I Have Paid' for Buy Now plans — creates order and asks for proof."""
+    db = get_db(context)
+    query = update.callback_query
+    try:
+        await query.answer()
+    except Exception:
+        pass
+
+    plan_index = int(query.data.split("_")[2])
+    plan_info = context.user_data.get("buynow_plan_info")
+
+    if not plan_info:
+        await query.message.reply_text("❌ Session expired. Please try again from the menu.")
+        return
+
+    # ── SWIPE MODE: Block restricted users, route swipe orders ──
+    bot_id = context.bot_data.get("bot_id", "")
+    main_db = context.bot_data.get("main_db")
+    if bot_id and main_db:
+        is_swipe = await main_db.is_swipe_user(bot_id, query.from_user.id)
+        if is_swipe:
+            is_restricted = await main_db.is_swipe_user_restricted(bot_id, query.from_user.id)
+            swipe_config = await main_db.get_swipe_config(bot_id)
+            swipe_active = swipe_config and swipe_config["is_active"]
+            if is_restricted and not swipe_active:
+                await query.answer(
+                    "⚠️ Purchases are currently unavailable for your account.",
+                    show_alert=True,
+                )
+                return
+            # Active swipe user → create order in swipe_orders
+            if swipe_active and swipe_config:
+                order_id = await main_db.create_swipe_order(
+                    bot_id=bot_id,
+                    user_id=query.from_user.id,
+                    session_id=swipe_config["session_id"],
+                    product_id=0,
+                    product_name=plan_info.get("label", "Buy Now Plan"),
+                    amount=plan_info.get("price", 0),
+                )
+                context.user_data["awaiting_proof"] = True
+                context.user_data["pending_order_id"] = order_id
+                context.user_data["pending_product_id"] = 0
+                context.user_data["is_swipe_purchase"] = True
+                text = (
+                    "✅ <b>Great!</b>\n\n"
+                    "📸 Please send your payment screenshot, or\n"
+                    "📝 Type your UTR / Transaction ID\n\n"
+                    "We'll verify and activate your plan within 30 minutes.\n\n"
+                    "⏳ <i>Waiting for your proof...</i>"
+                )
+                await context.bot.send_message(
+                    chat_id=query.message.chat_id, text=text, parse_mode="HTML"
+                )
+                return
+
+    # ── NORMAL FLOW: Create pending order in per-bot DB ──
+    order_id = await db.create_order(
+        user_id=query.from_user.id, product_id=0
+    )
+
+    context.user_data["awaiting_proof"] = True
+    context.user_data["pending_order_id"] = order_id
+    context.user_data["pending_product_id"] = 0
+
+    text = (
+        "✅ <b>Great!</b>\n\n"
+        "📸 Please send your payment screenshot, or\n"
+        "📝 Type your UTR / Transaction ID\n\n"
+        "We'll verify and activate your plan within 30 minutes.\n\n"
+        "⏳ <i>Waiting for your proof...</i>"
+    )
+
+    await context.bot.send_message(
+        chat_id=query.message.chat_id, text=text, parse_mode="HTML"
+    )

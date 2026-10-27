@@ -14,6 +14,7 @@ from utils.bot_helpers import (
     get_db, get_forward_protection, get_auto_disappear,
     get_setting_with_fallback, get_products_db, is_main_bot,
     get_color_buttons_enabled, get_auto_disappear_seconds,
+    has_buynow_access,
 )
 from utils.media_clone import get_translated_file_id
 from utils.helpers import format_price
@@ -53,20 +54,54 @@ async def build_product_keyboard(context) -> InlineKeyboardMarkup:
             btn_kwargs["style"] = style
         keyboard.append([InlineKeyboardButton(**btn_kwargs)])
 
+    # Buy Now button — vertical (only if hosted bot has access AND toggle enabled)
+    bot_id = context.bot_data.get("bot_id", "")
+    if bot_id:
+        try:
+            buynow_access = await has_buynow_access(context)
+            if buynow_access:
+                buynow_enabled = await get_setting_with_fallback(context, "buynow_enabled")
+                if buynow_enabled == "1":
+                    keyboard.append([InlineKeyboardButton("💰 Buy Now", callback_data="buynow_menu", style="success")])
+        except Exception:
+            pass
+
+    # Demo button — vertical (if enabled)
+    demo_enabled = await get_setting_with_fallback(context, "demo_button_enabled")
+    if demo_enabled == "1":
+        demo_link = await get_setting_with_fallback(context, "demo_link") or ""
+        demo_color = await get_setting_with_fallback(context, "demo_button_color") or ""
+        btn_kwargs = {"text": "🎬 Demo"}
+        if demo_link:
+            btn_kwargs["url"] = demo_link
+        else:
+            btn_kwargs["callback_data"] = "show_demo"
+        if color_enabled and demo_color in ("primary", "success", "danger"):
+            btn_kwargs["style"] = demo_color
+        keyboard.append([InlineKeyboardButton(**btn_kwargs)])
+
     # Proof button — uses fallback (per-bot → main)
     proof_enabled = await get_setting_with_fallback(context, "proof_button_enabled")
     if proof_enabled == "1":
         proof_link = await get_setting_with_fallback(context, "proof_link") or ""
+        proof_color = await get_setting_with_fallback(context, "proof_button_color") or ""
+        proof_btn_kwargs = {"text": "📸 Proof"}
         if proof_link:
-            keyboard.append([InlineKeyboardButton("📸 Proof", url=proof_link)])
+            proof_btn_kwargs["url"] = proof_link
         else:
-            keyboard.append([InlineKeyboardButton("📸 Proof", callback_data="show_proof")])
+            proof_btn_kwargs["callback_data"] = "show_proof"
+        if color_enabled and proof_color in ("primary", "success", "danger"):
+            proof_btn_kwargs["style"] = proof_color
+        keyboard.append([InlineKeyboardButton(**proof_btn_kwargs)])
 
-    # How to Use button — conditional (per-bot → main fallback)
+    # Bottom row — horizontal: How to Use + Report an Issue
+    bottom_row = []
     htu_enabled = await get_setting_with_fallback(context, "htu_button_enabled")
     if htu_enabled != "0":
-        keyboard.append([InlineKeyboardButton("❓ How to Use", callback_data="how_to_use")])
-    keyboard.append([InlineKeyboardButton("🆘 Report an Issue", callback_data="report_issue")])
+        bottom_row.append(InlineKeyboardButton("❓ How to Use", callback_data="how_to_use"))
+    bottom_row.append(InlineKeyboardButton("🆘 Report an Issue", callback_data="report_issue", style="primary"))
+    if bottom_row:
+        keyboard.append(bottom_row)
 
     return InlineKeyboardMarkup(keyboard)
 
@@ -151,11 +186,11 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         logger.warning(f"Skipping un-cloned welcome media: {raw_id[:30]}...")
                         continue
                     if translated_id.startswith("photo:"):
-                        media_group.append(InputMediaPhoto(translated_id.replace("photo:", "", 1)))
+                        media_group.append(InputMediaPhoto(translated_id.replace("photo:", "", 1), has_spoiler=True))
                     elif translated_id.startswith("video:"):
-                        media_group.append(InputMediaVideo(translated_id.replace("video:", "", 1)))
+                        media_group.append(InputMediaVideo(translated_id.replace("video:", "", 1), has_spoiler=True))
                     else:
-                        media_group.append(InputMediaVideo(translated_id))
+                        media_group.append(InputMediaVideo(translated_id, has_spoiler=True))
 
                 chunk_size = 10
                 for i in range(0, len(media_group), chunk_size):
@@ -164,9 +199,9 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         if len(chunk) == 1:
                             item = chunk[0]
                             if isinstance(item, InputMediaPhoto):
-                                await context.bot.send_photo(chat_id=update.message.chat_id, photo=item.media, protect_content=protect)
+                                await context.bot.send_photo(chat_id=update.message.chat_id, photo=item.media, protect_content=protect, has_spoiler=True)
                             else:
-                                await context.bot.send_video(chat_id=update.message.chat_id, video=item.media, protect_content=protect)
+                                await context.bot.send_video(chat_id=update.message.chat_id, video=item.media, protect_content=protect, has_spoiler=True)
                         else:
                             await context.bot.send_media_group(
                                 chat_id=update.message.chat_id, media=chunk,
@@ -185,7 +220,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 translated_id = await get_translated_file_id(context, f"video:{video_id}")
                 video_id = translated_id.replace("video:", "")
                 try:
-                    await update.message.reply_video(video=video_id, protect_content=protect)
+                    await update.message.reply_video(video=video_id, protect_content=protect, has_spoiler=True)
                 except Exception:
                     pass
         else:
@@ -194,7 +229,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 translated_id = await get_translated_file_id(context, f"photo:{photo_id}")
                 photo_id = translated_id.replace("photo:", "")
                 try:
-                    await update.message.reply_photo(photo=photo_id, protect_content=protect)
+                    await update.message.reply_photo(photo=photo_id, protect_content=protect, has_spoiler=True)
                 except Exception:
                     pass
 
@@ -240,11 +275,11 @@ async def product_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 logger.warning(f"Skipping un-cloned trial media: {raw_id[:30]}...")
                 continue
             if translated_id.startswith("photo:"):
-                media_group.append(InputMediaPhoto(translated_id.replace("photo:", "", 1)))
+                media_group.append(InputMediaPhoto(translated_id.replace("photo:", "", 1), has_spoiler=True))
             elif translated_id.startswith("video:"):
-                media_group.append(InputMediaVideo(translated_id.replace("video:", "", 1)))
+                media_group.append(InputMediaVideo(translated_id.replace("video:", "", 1), has_spoiler=True))
             else:
-                media_group.append(InputMediaVideo(translated_id))
+                media_group.append(InputMediaVideo(translated_id, has_spoiler=True))
 
         chunk_size = 10
         for i in range(0, len(media_group), chunk_size):
@@ -253,9 +288,9 @@ async def product_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if len(chunk) == 1:
                     item = chunk[0]
                     if isinstance(item, InputMediaPhoto):
-                        msg = await context.bot.send_photo(chat_id=query.message.chat_id, photo=item.media, protect_content=protect)
+                        msg = await context.bot.send_photo(chat_id=query.message.chat_id, photo=item.media, protect_content=protect, has_spoiler=True)
                     else:
-                        msg = await context.bot.send_video(chat_id=query.message.chat_id, video=item.media, protect_content=protect)
+                        msg = await context.bot.send_video(chat_id=query.message.chat_id, video=item.media, protect_content=protect, has_spoiler=True)
                     if should_disappear and msg:
                         sent_messages.append(msg)
                 else:
@@ -287,28 +322,26 @@ async def product_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     keyboard = [
         [
-            InlineKeyboardButton("💰 Buy Now", callback_data=f"buy_{product_id}", style="primary"),
-            InlineKeyboardButton("🔙 Back", callback_data="back_to_products"),
-        ]
+            InlineKeyboardButton("💰 Buy Now", callback_data=f"buy_{product_id}", style="success"),
+        ],
+        [
+            InlineKeyboardButton("🔙 Back", callback_data="back_to_products", style="danger"),
+        ],
     ]
 
-    buy_msg = await context.bot.send_message(
-        chat_id=query.message.chat_id,
-        text=text,
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode="Markdown",
-    )
-
-    # Buy/Back menu bhi auto-disappear hoga along with trial media
-    if trial_ids and should_disappear and buy_msg:
-        disappear_seconds = await get_auto_disappear_seconds(context)
-        async def _auto_delete_buy(bot, chat_id, message_id, delay):
-            await asyncio.sleep(delay)
-            try:
-                await bot.delete_message(chat_id=chat_id, message_id=message_id)
-            except Exception:
-                pass
-        asyncio.create_task(_auto_delete_buy(context.bot, query.message.chat_id, buy_msg.message_id, disappear_seconds))
+    try:
+        await query.edit_message_text(
+            text=text,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown",
+        )
+    except Exception:
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text=text,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown",
+        )
 
 
 async def back_to_products_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -399,3 +432,62 @@ async def cancel_issue_callback(update: Update, context: ContextTypes.DEFAULT_TY
         pass
     context.user_data.pop("awaiting_issue", None)
     await query.edit_message_text("✅ Issue reporting cancelled.")
+
+
+async def buynow_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Buy Now menu — shows price list + plan buttons. Replaces main menu via edit."""
+    query = update.callback_query
+    try:
+        await query.answer()
+    except Exception:
+        pass
+
+    db = get_db(context)
+    price_list = await get_setting_with_fallback(context, "buynow_price_list")
+    plans_json = await get_setting_with_fallback(context, "buynow_plans")
+
+    try:
+        plans = json.loads(plans_json) if plans_json else []
+    except (json.JSONDecodeError, TypeError):
+        plans = []
+
+    text = "💰 *Buy Now*\n\n"
+    if price_list:
+        text += f"{price_list}\n\n"
+    if plans:
+        text += "👇 *Choose a plan below:*"
+    else:
+        text += "❌ _No plans configured yet._"
+
+    keyboard = []
+    for i, plan in enumerate(plans[:3]):
+        label = f"{plan.get('label', f'Plan {i+1}')} — ₹{plan.get('price', 0)} / {plan.get('days', 0)} Days"
+        style = plan.get("color", "")
+        btn_kwargs = {"text": label, "callback_data": f"buynow_plan_{i}"}
+        if style in ("primary", "success", "danger"):
+            btn_kwargs["style"] = style
+        keyboard.append([InlineKeyboardButton(**btn_kwargs)])
+
+    keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="back_to_products", style="danger")])
+
+    try:
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+    except Exception:
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text=text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown",
+        )
+
+
+async def show_demo_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Demo button callback — when no demo link is set, show a message."""
+    query = update.callback_query
+    try:
+        await query.answer()
+    except Exception:
+        pass
+    await context.bot.send_message(
+        chat_id=query.message.chat_id,
+        text="🎬 *Demo*\n\n❌ Demo link is not configured yet.\nPlease contact admin.",
+        parse_mode="Markdown",
+    )

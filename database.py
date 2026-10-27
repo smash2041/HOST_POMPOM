@@ -201,6 +201,13 @@ class Database:
                     resolved_at TEXT DEFAULT '',
                     resolved_by INTEGER DEFAULT 0
                 )""",
+                # ── Buy Now Access table ──
+                """CREATE TABLE IF NOT EXISTS buynow_access (
+                    bot_id TEXT PRIMARY KEY,
+                    is_granted INTEGER DEFAULT 0,
+                    granted_by INTEGER DEFAULT 0,
+                    granted_at TEXT DEFAULT (datetime('now'))
+                )""",
             ]
             for sql in main_tables:
                 await self.execute(sql)
@@ -241,6 +248,14 @@ class Database:
             "welcome_text": "",
             "color_buttons_enabled": "1",
             "auto_disappear_seconds": "1800",
+            "demo_button_enabled": "0",
+            "demo_link": "",
+            "demo_button_color": "",
+            "proof_button_color": "",
+            "buynow_enabled": "0",
+            "buynow_price_list": "",
+            "buynow_plans": "[]",
+            "buynow_channel_link": "",
         }
         for key, value in defaults.items():
             existing = await self.get_setting(key)
@@ -711,6 +726,50 @@ class Database:
             "approved_orders": approved.rows[0][0] if approved.rows else 0,
             "total_revenue": revenue.rows[0][0] if revenue.rows else 0,
         }
+
+    # ──────────────── BUY NOW ACCESS ────────────────
+
+    async def grant_buynow_access(self, bot_id, granted_by=0):
+        """Grant Buy Now toggle access to a hosted bot."""
+        existing = await self.execute(
+            "SELECT bot_id FROM buynow_access WHERE bot_id = ?", [bot_id]
+        )
+        if existing.rows:
+            await self.execute(
+                "UPDATE buynow_access SET is_granted = 1, granted_by = ?, "
+                "granted_at = datetime('now') WHERE bot_id = ?",
+                [granted_by, bot_id],
+            )
+        else:
+            await self.execute(
+                "INSERT INTO buynow_access (bot_id, is_granted, granted_by) "
+                "VALUES (?, 1, ?)",
+                [bot_id, granted_by],
+            )
+
+    async def revoke_buynow_access(self, bot_id):
+        """Revoke Buy Now toggle access from a hosted bot."""
+        await self.execute(
+            "UPDATE buynow_access SET is_granted = 0 WHERE bot_id = ?", [bot_id]
+        )
+
+    async def has_buynow_access(self, bot_id):
+        """Check if a hosted bot has Buy Now toggle access."""
+        result = await self.execute(
+            "SELECT is_granted FROM buynow_access WHERE bot_id = ?", [bot_id]
+        )
+        if result.rows:
+            return result.rows[0][0] == 1
+        return False
+
+    async def get_all_buynow_access(self):
+        """Get all buynow access records."""
+        result = await self.execute(
+            "SELECT bot_id, is_granted, granted_by, granted_at FROM buynow_access "
+            "WHERE is_granted = 1"
+        )
+        return [{"bot_id": r[0], "is_granted": r[1], "granted_by": r[2],
+                 "granted_at": r[3]} for r in result.rows]
 
     # ──────────────── HELPERS ────────────────
 

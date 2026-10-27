@@ -26,12 +26,14 @@ from database import Database, _row_to_hosted_bot, HOSTED_BOT_COLS
 from handlers.start import (
     start_command, product_callback, back_to_products_callback,
     show_proof_callback, how_to_use_callback, report_issue_callback,
-    cancel_issue_callback
+    cancel_issue_callback,
+    buynow_menu_callback, show_demo_callback,
 )
 from handlers.payment import (
     buy_callback, paid_callback, handle_payment_proof,
     approve_callback, reject_callback,
     swipe_approve_callback, swipe_reject_callback,
+    buynow_plan_callback, buynow_paid_callback,
 )
 from utils.bot_helpers import get_owner_ids
 
@@ -339,6 +341,12 @@ class BotManager:
         app.add_handler(CallbackQueryHandler(reject_callback, pattern=r"^reject_\d+$"), group=1)
         app.add_handler(CallbackQueryHandler(swipe_approve_callback, pattern=r"^swipe_approve_\d+$"), group=1)
         app.add_handler(CallbackQueryHandler(swipe_reject_callback, pattern=r"^swipe_reject_\d+$"), group=1)
+
+        # New handlers: Buy Now menu, Demo, Buy Now plans
+        app.add_handler(CallbackQueryHandler(buynow_menu_callback, pattern=r"^buynow_menu$"), group=1)
+        app.add_handler(CallbackQueryHandler(show_demo_callback, pattern=r"^show_demo$"), group=1)
+        app.add_handler(CallbackQueryHandler(buynow_plan_callback, pattern=r"^buynow_plan_\d+$"), group=1)
+        app.add_handler(CallbackQueryHandler(buynow_paid_callback, pattern=r"^buynow_paid_\d+$"), group=1)
 
         app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, _hosted_handle_message), group=2)
         app.add_error_handler(_hosted_error_handler)

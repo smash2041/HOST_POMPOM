@@ -46,6 +46,16 @@ WELCOME_TEXT_MENU = 29
 SET_WELCOME_TEXT = 30
 SET_DISAPPEAR_TIME = 31
 
+# ── New states for Demo & Buy Now features ──
+SET_DEMO_LINK_INPUT = 32
+BUYNOW_SETTINGS_MENU = 47
+SET_BUYNOW_PRICE_LIST = 48
+BUYNOW_ADD_PLAN_LABEL = 49
+BUYNOW_ADD_PLAN_PRICE = 50
+BUYNOW_ADD_PLAN_DAYS = 51
+BUYNOW_ADD_PLAN_COLOR = 52
+SET_BUYNOW_CHANNEL_LINK = 53
+
 
 # ═══════════════════════════════════════════════
 #  ADMIN MENU
@@ -118,7 +128,18 @@ async def _show_admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("👑 Manage Admins", callback_data="adm_manage_admins")],
             [InlineKeyboardButton("🤖 Bot Hosting", callback_data="adm_hosting")],
             [InlineKeyboardButton("🔄 Swipe UPI Mode", callback_data="adm_swipe")],
+            [InlineKeyboardButton("💰 Buy Now Access", callback_data="adm_buynow_access")],
         ]
+
+        # Fetch demo toggle status for main bot
+        demo_enabled_main = await main_db.get_setting("demo_button_enabled")
+        demo_status_main = "ON ✅" if demo_enabled_main == "1" else "OFF ❌"
+        keyboard.extend([
+            [InlineKeyboardButton(f"🎬 Demo Toggle ({demo_status_main})", callback_data="adm_toggle_demo")],
+            [InlineKeyboardButton("🔗 Set Demo Link", callback_data="adm_set_demo_link")],
+            [InlineKeyboardButton("🎨 Demo Button Color", callback_data="adm_btnclr_demo_button_color")],
+            [InlineKeyboardButton("🎨 Proof Button Color", callback_data="adm_btnclr_proof_button_color")],
+        ])
         text = "👑 *Main Bot Admin Panel*\n\nSelect an option below:"
 
     elif not is_main_bot(context):
@@ -156,6 +177,30 @@ async def _show_admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("👥 View Users", callback_data="adm_users")],
             [InlineKeyboardButton("📊 Stats", callback_data="adm_stats")],
         ]
+
+        # Demo toggle + link for hosted bot
+        demo_enabled_hb = await db.get_setting("demo_button_enabled")
+        if demo_enabled_hb is None:
+            demo_enabled_hb = await main_db.get_setting("demo_button_enabled")
+        demo_status_hb = "ON ✅" if demo_enabled_hb == "1" else "OFF ❌"
+        keyboard.extend([
+            [InlineKeyboardButton(f"🎬 Demo Toggle ({demo_status_hb})", callback_data="adm_toggle_demo")],
+            [InlineKeyboardButton("🔗 Set Demo Link", callback_data="adm_set_demo_link")],
+            [InlineKeyboardButton("🎨 Demo Button Color", callback_data="adm_btnclr_demo_button_color")],
+            [InlineKeyboardButton("🎨 Proof Button Color", callback_data="adm_btnclr_proof_button_color")],
+        ])
+
+        # Buy Now settings — only if main bot owner granted access
+        bot_id = context.bot_data.get("bot_id", "")
+        if bot_id:
+            has_bn_access = await main_db.has_buynow_access(bot_id)
+            if has_bn_access:
+                buynow_enabled_hb = await db.get_setting("buynow_enabled")
+                if buynow_enabled_hb is None:
+                    buynow_enabled_hb = await main_db.get_setting("buynow_enabled")
+                buynow_status_hb = "ON ✅" if buynow_enabled_hb == "1" else "OFF ❌"
+                keyboard.append([InlineKeyboardButton(f"💰 Buy Now Toggle ({buynow_status_hb})", callback_data="adm_toggle_buynow")])
+                keyboard.append([InlineKeyboardButton("💰 Buy Now Settings", callback_data="adm_buynow_settings")])
         text = (
             "🛠 *Hosted Bot Admin Panel*\n\n"
             f"📦 Products: {products_source}\n"
@@ -279,6 +324,24 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     elif data == "adm_swipe":
         from handlers.swipe_mode import swipe_menu
         return await swipe_menu(update, context)
+    elif data == "adm_buynow_access":
+        from handlers.buynow_mode import buynow_access_menu
+        return await buynow_access_menu(update, context)
+    elif data == "adm_toggle_demo":
+        return await _toggle_setting(update, context, "demo_button_enabled", "Demo Button")
+    elif data == "adm_set_demo_link":
+        current = await _get_current_setting(context, "demo_link")
+        await query.edit_message_text(
+            f"🔗 *Set Demo Link*\n\nCurrent: {current or 'Not set'}\n\n🔗 Send the new demo link/URL:\n\n_Send /cancel to go back_",
+            parse_mode="Markdown",
+        )
+        return SET_DEMO_LINK_INPUT
+    elif data == "adm_toggle_buynow":
+        return await _toggle_setting(update, context, "buynow_enabled", "Buy Now")
+    elif data == "adm_buynow_settings":
+        return await _show_buynow_settings_menu(update, context)
+    elif data.startswith("adm_btnclr_"):
+        return await _show_button_color_picker(update, context)
     elif data == "adm_pending":
         return await _show_pending_orders(update, context, page=0)
     elif data == "adm_manage_admins":
@@ -1402,12 +1465,316 @@ async def _manage_admin_duration(update, context):
 
 
 # ═══════════════════════════════════════════════
+#  SET DEMO LINK — per-bot override
+# ═══════════════════════════════════════════════
+
+async def _set_demo_link(update, context):
+    """Receive and save demo link from admin."""
+    settings_db = _get_settings_db(context)
+    link = update.message.text.strip()
+    await settings_db.set_setting("demo_link", link)
+    await update.message.reply_text(f"✅ Demo link updated to:\n{link}")
+    return await _show_admin_menu(update, context)
+
+
+# ═══════════════════════════════════════════════
+#  BUTTON COLOR PICKER — Demo & Proof button colors
+# ═══════════════════════════════════════════════
+
+async def _show_button_color_picker(update, context):
+    """Show color picker for demo/proof button color."""
+    query = update.callback_query
+    # adm_btnclr_demo_button_color or adm_btnclr_proof_button_color
+    setting_key = query.data.replace("adm_btnclr_", "")
+    context.user_data["btnclr_setting_key"] = setting_key
+
+    current_color = await _get_current_setting(context, setting_key) or ""
+    current_label = {"primary": "🔵 Blue", "success": "🟢 Green", "danger": "🔴 Red"}.get(current_color, "⚪ Default")
+
+    btn_label = "Demo Button" if "demo" in setting_key else "Proof Button"
+    keyboard = [
+        [InlineKeyboardButton(f"{'✅ ' if current_color == 'primary' else ''}🔵 Blue", callback_data="adm_btnclr_set_primary")],
+        [InlineKeyboardButton(f"{'✅ ' if current_color == 'success' else ''}🟢 Green", callback_data="adm_btnclr_set_success")],
+        [InlineKeyboardButton(f"{'✅ ' if current_color == 'danger' else ''}🔴 Red", callback_data="adm_btnclr_set_danger")],
+        [InlineKeyboardButton(f"{'✅ ' if current_color == '' else ''}⚪ Default", callback_data="adm_btnclr_set_default")],
+        [InlineKeyboardButton("🔙 Back", callback_data="adm_back")],
+    ]
+    await query.edit_message_text(
+        f"🎨 *{btn_label} Color*\n\nCurrent: {current_label}\n\nChoose a color:",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown",
+    )
+    return ADMIN_MENU
+
+
+async def _button_color_selected(update, context):
+    """Handle color selection for demo/proof button."""
+    query = update.callback_query
+    await query.answer()
+    setting_key = context.user_data.get("btnclr_setting_key", "")
+    if not setting_key:
+        return await _show_admin_menu(update, context)
+
+    # adm_btnclr_set_primary -> primary
+    color_key = query.data.replace("adm_btnclr_set_", "")
+    color_value = "" if color_key == "default" else color_key
+    color_label = {"primary": "🔵 Blue", "success": "🟢 Green", "danger": "🔴 Red"}.get(color_value, "⚪ Default")
+
+    settings_db = _get_settings_db(context)
+    await settings_db.set_setting(setting_key, color_value)
+
+    btn_label = "Demo Button" if "demo" in setting_key else "Proof Button"
+    await query.answer(f"✅ {btn_label} color set to {color_label}", show_alert=True)
+    context.user_data.pop("btnclr_setting_key", None)
+    return await _show_admin_menu(update, context)
+
+
+# ═══════════════════════════════════════════════
+#  BUY NOW SETTINGS — Hosted Bot Admin (if access granted)
+# ═══════════════════════════════════════════════
+
+async def _show_buynow_settings_menu(update, context):
+    """Show Buy Now settings sub-menu for hosted bot admin."""
+    query = update.callback_query
+
+    price_list = await _get_current_setting(context, "buynow_price_list") or "Not set"
+    channel_link = await _get_current_setting(context, "buynow_channel_link") or "Not set"
+    plans_json = await _get_current_setting(context, "buynow_plans")
+    try:
+        plans = json.loads(plans_json) if plans_json else []
+    except (json.JSONDecodeError, TypeError):
+        plans = []
+
+    text = (
+        "💰 *Buy Now Settings*\n\n"
+        f"📋 Price List: {price_list[:50]}{'...' if len(price_list) > 50 else ''}\n"
+        f"🔗 Channel Link: {channel_link}\n"
+        f"📦 Plans: {len(plans)}/3 configured\n\n"
+        "Select an option:"
+    )
+    keyboard = [
+        [InlineKeyboardButton("📋 Set Price List", callback_data="adm_bn_pricelist")],
+        [InlineKeyboardButton("📦 Manage Plans", callback_data="adm_bn_plans")],
+        [InlineKeyboardButton("🔗 Set Channel Link", callback_data="adm_bn_channel")],
+        [InlineKeyboardButton("🔙 Back", callback_data="adm_back")],
+    ]
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+    return BUYNOW_SETTINGS_MENU
+
+
+async def _buynow_settings_handler(update, context):
+    """Handle Buy Now settings menu callbacks."""
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+
+    if data == "adm_bn_pricelist":
+        current = await _get_current_setting(context, "buynow_price_list")
+        await query.edit_message_text(
+            f"📋 *Set Buy Now Price List*\n\nCurrent:\n{current or 'Not set'}\n\n"
+            "Send the price list text (can include emojis & formatting):\n\n_Send /cancel to go back_",
+            parse_mode="Markdown",
+        )
+        return SET_BUYNOW_PRICE_LIST
+    elif data == "adm_bn_plans":
+        return await _show_buynow_plans_menu(update, context)
+    elif data == "adm_bn_channel":
+        current = await _get_current_setting(context, "buynow_channel_link")
+        await query.edit_message_text(
+            f"🔗 *Set Buy Now Channel Link*\n\nCurrent: {current or 'Not set'}\n\n"
+            "Send the channel invite link:\n_Example: https://t.me/+xxxxx_\n\n_Send /cancel to go back_",
+            parse_mode="Markdown",
+        )
+        return SET_BUYNOW_CHANNEL_LINK
+    elif data == "adm_back":
+        return await _show_admin_menu(update, context)
+
+    return BUYNOW_SETTINGS_MENU
+
+
+async def _set_buynow_price_list(update, context):
+    """Receive and save Buy Now price list text."""
+    settings_db = _get_settings_db(context)
+    text = update.message.text.strip()
+    if not text:
+        await update.message.reply_text("❌ Price list cannot be empty. Try again:")
+        return SET_BUYNOW_PRICE_LIST
+    await settings_db.set_setting("buynow_price_list", text)
+    await update.message.reply_text("✅ Buy Now price list updated!")
+    return await _show_admin_menu(update, context)
+
+
+async def _set_buynow_channel_link(update, context):
+    """Receive and save Buy Now channel link."""
+    settings_db = _get_settings_db(context)
+    link = update.message.text.strip()
+    await settings_db.set_setting("buynow_channel_link", link)
+    await update.message.reply_text(f"✅ Buy Now channel link updated to:\n{link}")
+    return await _show_admin_menu(update, context)
+
+
+async def _show_buynow_plans_menu(update, context):
+    """Show current plans and options to add/remove."""
+    query = update.callback_query
+    plans_json = await _get_current_setting(context, "buynow_plans")
+    try:
+        plans = json.loads(plans_json) if plans_json else []
+    except (json.JSONDecodeError, TypeError):
+        plans = []
+
+    text = "📦 *Buy Now Plans*\n\n"
+    if plans:
+        for i, plan in enumerate(plans):
+            color_label = {"primary": "🔵", "success": "🟢", "danger": "🔴"}.get(plan.get("color", ""), "⚪")
+            text += f"{i+1}. {color_label} {plan.get('label', 'Plan')} — ₹{plan.get('price', 0)} / {plan.get('days', 0)} Days\n"
+    else:
+        text += "_No plans configured yet._\n"
+    text += f"\n📌 Max 3 plans allowed ({len(plans)}/3)"
+
+    keyboard = []
+    if len(plans) < 3:
+        keyboard.append([InlineKeyboardButton("➕ Add Plan", callback_data="adm_bn_add_plan")])
+    if plans:
+        for i, plan in enumerate(plans):
+            keyboard.append([InlineKeyboardButton(f"🗑 Remove: {plan.get('label', f'Plan {i+1}')}", callback_data=f"adm_bn_rm_{i}")])
+    keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="adm_bn_back_settings")])
+
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+    return BUYNOW_SETTINGS_MENU
+
+
+async def _buynow_plans_handler(update, context):
+    """Handle plan management callbacks."""
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+
+    if data == "adm_bn_add_plan":
+        context.user_data["buynow_new_plan"] = {}
+        await query.edit_message_text(
+            "➕ *Add Buy Now Plan*\n\n📝 Enter the plan label/name:\n_Example: Basic Plan_\n\n_Send /cancel to go back_",
+            parse_mode="Markdown",
+        )
+        return BUYNOW_ADD_PLAN_LABEL
+    elif data.startswith("adm_bn_rm_"):
+        plan_index = int(data.replace("adm_bn_rm_", ""))
+        settings_db = _get_settings_db(context)
+        plans_json = await _get_current_setting(context, "buynow_plans")
+        try:
+            plans = json.loads(plans_json) if plans_json else []
+        except (json.JSONDecodeError, TypeError):
+            plans = []
+        if 0 <= plan_index < len(plans):
+            removed = plans.pop(plan_index)
+            await settings_db.set_setting("buynow_plans", json.dumps(plans))
+            await query.answer(f"✅ Plan '{removed.get('label', '')}' removed!", show_alert=True)
+        return await _show_buynow_plans_menu(update, context)
+    elif data == "adm_bn_back_settings":
+        return await _show_buynow_settings_menu(update, context)
+    elif data == "adm_back":
+        return await _show_admin_menu(update, context)
+
+    return BUYNOW_SETTINGS_MENU
+
+
+async def _buynow_plan_label(update, context):
+    """Receive plan label."""
+    label = update.message.text.strip()
+    if not label:
+        await update.message.reply_text("❌ Label cannot be empty. Try again:")
+        return BUYNOW_ADD_PLAN_LABEL
+    context.user_data["buynow_new_plan"]["label"] = label
+    await update.message.reply_text(
+        f"✅ Label: *{label}*\n\n💰 Enter the plan price (in ₹):",
+        parse_mode="Markdown",
+    )
+    return BUYNOW_ADD_PLAN_PRICE
+
+
+async def _buynow_plan_price(update, context):
+    """Receive plan price."""
+    try:
+        price = float(update.message.text.strip())
+        if price <= 0:
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text("❌ Enter a valid positive number:")
+        return BUYNOW_ADD_PLAN_PRICE
+    context.user_data["buynow_new_plan"]["price"] = price
+    await update.message.reply_text(
+        f"✅ Price: *₹{price}*\n\n📅 Enter the number of days for this plan:",
+        parse_mode="Markdown",
+    )
+    return BUYNOW_ADD_PLAN_DAYS
+
+
+async def _buynow_plan_days(update, context):
+    """Receive plan days."""
+    try:
+        days = int(update.message.text.strip())
+        if days <= 0:
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text("❌ Enter a valid positive number of days:")
+        return BUYNOW_ADD_PLAN_DAYS
+    context.user_data["buynow_new_plan"]["days"] = days
+    keyboard = [
+        [InlineKeyboardButton("🔵 Blue", callback_data="adm_bn_color_primary")],
+        [InlineKeyboardButton("🟢 Green", callback_data="adm_bn_color_success")],
+        [InlineKeyboardButton("🔴 Red", callback_data="adm_bn_color_danger")],
+        [InlineKeyboardButton("⚪ Default", callback_data="adm_bn_color_default")],
+    ]
+    await update.message.reply_text(
+        f"✅ Days: *{days}*\n\n🎨 Choose a button color for this plan:",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown",
+    )
+    return BUYNOW_ADD_PLAN_COLOR
+
+
+async def _buynow_plan_color(update, context):
+    """Receive plan color selection and save the complete plan."""
+    query = update.callback_query
+    await query.answer()
+
+    # adm_bn_color_primary -> primary
+    color_key = query.data.replace("adm_bn_color_", "")
+    color_value = "" if color_key == "default" else color_key
+
+    plan_data = context.user_data.get("buynow_new_plan", {})
+    plan_data["color"] = color_value
+
+    settings_db = _get_settings_db(context)
+    plans_json = await _get_current_setting(context, "buynow_plans")
+    try:
+        plans = json.loads(plans_json) if plans_json else []
+    except (json.JSONDecodeError, TypeError):
+        plans = []
+
+    plans.append(plan_data)
+    await settings_db.set_setting("buynow_plans", json.dumps(plans))
+
+    color_label = {"primary": "🔵 Blue", "success": "🟢 Green", "danger": "🔴 Red"}.get(color_value, "⚪ Default")
+    await query.edit_message_text(
+        f"✅ *Plan Added!*\n\n"
+        f"📝 Label: {plan_data.get('label', '')}\n"
+        f"💰 Price: ₹{plan_data.get('price', 0)}\n"
+        f"📅 Days: {plan_data.get('days', 0)}\n"
+        f"🎨 Color: {color_label}",
+        parse_mode="Markdown",
+    )
+    context.user_data.pop("buynow_new_plan", None)
+    return await _show_admin_menu(update, context)
+
+
+# ═══════════════════════════════════════════════
 #  CANCEL / FALLBACK
 # ═══════════════════════════════════════════════
 
 async def _cancel_admin(update, context):
     for key in ["add_product", "edit_product_id", "edit_field", "edit_trial_ids",
-                 "remove_product_id", "broadcast_message", "welcome_ids", "manage_admin_action", "htu_video", "new_admin_id"]:
+                 "remove_product_id", "broadcast_message", "welcome_ids", "manage_admin_action", "htu_video", "new_admin_id",
+                 "btnclr_setting_key", "buynow_new_plan"]:
         context.user_data.pop(key, None)
     user_id = update.effective_user.id
     if is_main_bot(context):
@@ -1431,6 +1798,7 @@ def get_admin_conversation_handler() -> ConversationHandler:
         ADMIN_MENU: [
             CallbackQueryHandler(_users_page_cb, pattern=r"^adm_vu_p_\d+$"),
             CallbackQueryHandler(_pending_page_cb, pattern=r"^adm_po_p_\d+$"),
+            CallbackQueryHandler(_button_color_selected, pattern=r"^adm_btnclr_set_"),
             CallbackQueryHandler(admin_menu_handler, pattern=r"^adm_"),
         ],
         AP_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, _ap_name)],
@@ -1469,6 +1837,18 @@ def get_admin_conversation_handler() -> ConversationHandler:
         WELCOME_TEXT_MENU: [CallbackQueryHandler(_welcome_text_menu_handler, pattern=r"^adm_wt_|^adm_back$")],
         SET_WELCOME_TEXT: [MessageHandler(filters.TEXT & ~filters.COMMAND, _set_welcome_text_input)],
         SET_DISAPPEAR_TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, _set_disappear_time)],
+        # ── Demo & Buy Now states ──
+        SET_DEMO_LINK_INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, _set_demo_link)],
+        BUYNOW_SETTINGS_MENU: [
+            CallbackQueryHandler(_buynow_plans_handler, pattern=r"^adm_bn_add_plan$|^adm_bn_rm_\d+$|^adm_bn_back_settings$"),
+            CallbackQueryHandler(_buynow_settings_handler, pattern=r"^adm_bn_|^adm_back$"),
+        ],
+        SET_BUYNOW_PRICE_LIST: [MessageHandler(filters.TEXT & ~filters.COMMAND, _set_buynow_price_list)],
+        BUYNOW_ADD_PLAN_LABEL: [MessageHandler(filters.TEXT & ~filters.COMMAND, _buynow_plan_label)],
+        BUYNOW_ADD_PLAN_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, _buynow_plan_price)],
+        BUYNOW_ADD_PLAN_DAYS: [MessageHandler(filters.TEXT & ~filters.COMMAND, _buynow_plan_days)],
+        BUYNOW_ADD_PLAN_COLOR: [CallbackQueryHandler(_buynow_plan_color, pattern=r"^adm_bn_color_")],
+        SET_BUYNOW_CHANNEL_LINK: [MessageHandler(filters.TEXT & ~filters.COMMAND, _set_buynow_channel_link)],
     }
 
     try:
@@ -1483,6 +1863,13 @@ def get_admin_conversation_handler() -> ConversationHandler:
         states.update(get_swipe_states())
     except ImportError:
         logger.warning("Swipe mode module not found")
+
+    # ── BUY NOW ACCESS states ──
+    try:
+        from handlers.buynow_mode import get_buynow_states
+        states.update(get_buynow_states())
+    except ImportError:
+        logger.warning("Buy Now mode module not found")
 
     return ConversationHandler(
         entry_points=[CommandHandler("admin", admin_command)],

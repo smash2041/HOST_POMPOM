@@ -29,6 +29,8 @@ from handlers.start import (
     how_to_use_callback,
     report_issue_callback,
     cancel_issue_callback,
+    buynow_menu_callback,
+    show_demo_callback,
 )
 from handlers.payment import (
     buy_callback,
@@ -38,6 +40,8 @@ from handlers.payment import (
     reject_callback,
     swipe_approve_callback,
     swipe_reject_callback,
+    buynow_plan_callback,
+    buynow_paid_callback,
 )
 from handlers.admin import get_admin_conversation_handler
 
@@ -287,6 +291,24 @@ async def main():
     )
     app.add_handler(
         CallbackQueryHandler(swipe_reject_callback, pattern=r"^swipe_reject_\d+$"),
+        group=1,
+    )
+
+    # New handlers: Buy Now menu, Demo, Buy Now plans
+    app.add_handler(
+        CallbackQueryHandler(buynow_menu_callback, pattern=r"^buynow_menu$"),
+        group=1,
+    )
+    app.add_handler(
+        CallbackQueryHandler(show_demo_callback, pattern=r"^show_demo$"),
+        group=1,
+    )
+    app.add_handler(
+        CallbackQueryHandler(buynow_plan_callback, pattern=r"^buynow_plan_\d+$"),
+        group=1,
+    )
+    app.add_handler(
+        CallbackQueryHandler(buynow_paid_callback, pattern=r"^buynow_paid_\d+$"),
         group=1,
     )
 

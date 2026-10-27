@@ -119,3 +119,12 @@ async def get_auto_disappear_seconds(context):
         return int(result) if result else 1800
     except (ValueError, TypeError):
         return 1800
+
+
+async def has_buynow_access(context):
+    """Check if current hosted bot has Buy Now toggle access (from main DB)."""
+    bot_id = context.bot_data.get("bot_id", "")
+    if not bot_id:
+        return False
+    main_db = get_main_db(context)
+    return await main_db.has_buynow_access(bot_id)
