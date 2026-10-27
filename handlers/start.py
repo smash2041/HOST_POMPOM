@@ -168,6 +168,10 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     protect = await get_forward_protection(context)
 
     # Send welcome media — uses fallback (per-bot setting → main setting)
+    # Store message IDs so we can delete them when user clicks a product
+    welcome_media_msg_ids = []
+    chat_id = update.message.chat_id
+
     media_ids_json = await get_setting_with_fallback(context, "welcome_media_ids")
     if media_ids_json and media_ids_json != "[]":
         try:
@@ -199,14 +203,18 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         if len(chunk) == 1:
                             item = chunk[0]
                             if isinstance(item, InputMediaPhoto):
-                                await context.bot.send_photo(chat_id=update.message.chat_id, photo=item.media, protect_content=protect, has_spoiler=True)
+                                _wm = await context.bot.send_photo(chat_id=chat_id, photo=item.media, protect_content=protect, has_spoiler=True)
                             else:
-                                await context.bot.send_video(chat_id=update.message.chat_id, video=item.media, protect_content=protect, has_spoiler=True)
+                                _wm = await context.bot.send_video(chat_id=chat_id, video=item.media, protect_content=protect, has_spoiler=True)
+                            if _wm:
+                                welcome_media_msg_ids.append(_wm.message_id)
                         else:
-                            await context.bot.send_media_group(
-                                chat_id=update.message.chat_id, media=chunk,
+                            _wms = await context.bot.send_media_group(
+                                chat_id=chat_id, media=chunk,
                                 protect_content=protect,
                             )
+                            if _wms:
+                                welcome_media_msg_ids.extend([m.message_id for m in _wms])
                     except Exception as e:
                         logger.warning(f"Failed to send welcome media group chunk: {e}")
         except Exception as e:
@@ -220,7 +228,9 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 translated_id = await get_translated_file_id(context, f"video:{video_id}")
                 video_id = translated_id.replace("video:", "")
                 try:
-                    await update.message.reply_video(video=video_id, protect_content=protect, has_spoiler=True)
+                    _wm = await update.message.reply_video(video=video_id, protect_content=protect, has_spoiler=True)
+                    if _wm:
+                        welcome_media_msg_ids.append(_wm.message_id)
                 except Exception:
                     pass
         else:
@@ -229,9 +239,15 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 translated_id = await get_translated_file_id(context, f"photo:{photo_id}")
                 photo_id = translated_id.replace("photo:", "")
                 try:
-                    await update.message.reply_photo(photo=photo_id, protect_content=protect, has_spoiler=True)
+                    _wm = await update.message.reply_photo(photo=photo_id, protect_content=protect, has_spoiler=True)
+                    if _wm:
+                        welcome_media_msg_ids.append(_wm.message_id)
                 except Exception:
                     pass
+
+    # Store welcome media message IDs for deletion when user clicks a product
+    context.user_data["welcome_media_msg_ids"] = welcome_media_msg_ids
+    context.user_data["welcome_chat_id"] = chat_id
 
     reply_markup = await build_product_keyboard(context)
     custom_text = await get_setting_with_fallback(context, "welcome_text")
@@ -255,7 +271,18 @@ async def product_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text("❌ Product not found.")
         return
 
+    # ── Delete welcome media messages so product page looks clean ──
+    welcome_msg_ids = context.user_data.pop("welcome_media_msg_ids", [])
+    if welcome_msg_ids:
+        w_chat_id = context.user_data.get("welcome_chat_id", query.message.chat_id)
+        for mid in welcome_msg_ids:
+            try:
+                await context.bot.delete_message(chat_id=w_chat_id, message_id=mid)
+            except Exception:
+                pass
+
     trial_ids = product.get("trial_file_ids_list", [])
+    trial_sent_msg_ids = []  # Store all trial media msg IDs for back button cleanup
     if trial_ids:
         protect = await get_forward_protection(context)
         should_disappear = await get_auto_disappear(context)
@@ -291,15 +318,19 @@ async def product_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         msg = await context.bot.send_photo(chat_id=query.message.chat_id, photo=item.media, protect_content=protect, has_spoiler=True)
                     else:
                         msg = await context.bot.send_video(chat_id=query.message.chat_id, video=item.media, protect_content=protect, has_spoiler=True)
-                    if should_disappear and msg:
-                        sent_messages.append(msg)
+                    if msg:
+                        trial_sent_msg_ids.append(msg.message_id)
+                        if should_disappear:
+                            sent_messages.append(msg)
                 else:
                     sent_msgs = await context.bot.send_media_group(
                         chat_id=query.message.chat_id, media=chunk,
                         protect_content=protect,
                     )
-                    if should_disappear and sent_msgs:
-                        sent_messages.extend(sent_msgs)
+                    if sent_msgs:
+                        trial_sent_msg_ids.extend([m.message_id for m in sent_msgs])
+                        if should_disappear:
+                            sent_messages.extend(sent_msgs)
             except Exception as e:
                 logger.warning(f"Failed to send media group chunk: {e}")
 
@@ -313,6 +344,9 @@ async def product_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     except Exception:
                         pass
             asyncio.create_task(_auto_delete(context.bot, query.message.chat_id, list(sent_messages), disappear_seconds))
+
+    # Store trial media msg IDs so back button can clean them up
+    context.user_data["product_trial_msg_ids"] = trial_sent_msg_ids
 
     text = f"📦 *{product['name']}*\n"
     if product.get("description"):
@@ -350,6 +384,95 @@ async def back_to_products_callback(update: Update, context: ContextTypes.DEFAUL
         await query.answer()
     except Exception:
         pass
+
+    chat_id = query.message.chat_id
+
+    # ── Delete trial media messages that were sent for the product ──
+    trial_msg_ids = context.user_data.pop("product_trial_msg_ids", [])
+    if trial_msg_ids:
+        for mid in trial_msg_ids:
+            try:
+                await context.bot.delete_message(chat_id=chat_id, message_id=mid)
+            except Exception:
+                pass
+
+    # ── Re-send welcome media ──
+    protect = await get_forward_protection(context)
+    welcome_media_msg_ids = []
+
+    media_ids_json = await get_setting_with_fallback(context, "welcome_media_ids")
+    if media_ids_json and media_ids_json != "[]":
+        try:
+            welcome_ids = json.loads(media_ids_json)
+            if welcome_ids:
+                per_bot_db = get_db(context)
+                per_bot_value = await per_bot_db.get_setting("welcome_media_ids")
+                is_from_main = not is_main_bot(context) and (not per_bot_value or per_bot_value == "[]")
+
+                media_group = []
+                for raw_id in welcome_ids:
+                    translated_id = await get_translated_file_id(context, raw_id)
+                    if translated_id == raw_id and is_from_main:
+                        continue
+                    if translated_id.startswith("photo:"):
+                        media_group.append(InputMediaPhoto(translated_id.replace("photo:", "", 1), has_spoiler=True))
+                    elif translated_id.startswith("video:"):
+                        media_group.append(InputMediaVideo(translated_id.replace("video:", "", 1), has_spoiler=True))
+                    else:
+                        media_group.append(InputMediaVideo(translated_id, has_spoiler=True))
+
+                chunk_size = 10
+                for i in range(0, len(media_group), chunk_size):
+                    chunk = media_group[i:i + chunk_size]
+                    try:
+                        if len(chunk) == 1:
+                            item = chunk[0]
+                            if isinstance(item, InputMediaPhoto):
+                                _wm = await context.bot.send_photo(chat_id=chat_id, photo=item.media, protect_content=protect, has_spoiler=True)
+                            else:
+                                _wm = await context.bot.send_video(chat_id=chat_id, video=item.media, protect_content=protect, has_spoiler=True)
+                            if _wm:
+                                welcome_media_msg_ids.append(_wm.message_id)
+                        else:
+                            _wms = await context.bot.send_media_group(
+                                chat_id=chat_id, media=chunk,
+                                protect_content=protect,
+                            )
+                            if _wms:
+                                welcome_media_msg_ids.extend([m.message_id for m in _wms])
+                    except Exception as e:
+                        logger.warning(f"Failed to re-send welcome media chunk: {e}")
+        except Exception as e:
+            logger.warning(f"Failed to parse welcome_media_ids for back: {e}")
+    else:
+        media_type = await get_setting_with_fallback(context, "welcome_media_type") or "video"
+        if media_type == "video":
+            video_id = await get_setting_with_fallback(context, "welcome_video_id")
+            if video_id:
+                translated_id = await get_translated_file_id(context, f"video:{video_id}")
+                video_id = translated_id.replace("video:", "")
+                try:
+                    _wm = await context.bot.send_video(chat_id=chat_id, video=video_id, protect_content=protect, has_spoiler=True)
+                    if _wm:
+                        welcome_media_msg_ids.append(_wm.message_id)
+                except Exception:
+                    pass
+        else:
+            photo_id = await get_setting_with_fallback(context, "welcome_photo_id")
+            if photo_id:
+                translated_id = await get_translated_file_id(context, f"photo:{photo_id}")
+                photo_id = translated_id.replace("photo:", "")
+                try:
+                    _wm = await context.bot.send_photo(chat_id=chat_id, photo=photo_id, protect_content=protect, has_spoiler=True)
+                    if _wm:
+                        welcome_media_msg_ids.append(_wm.message_id)
+                except Exception:
+                    pass
+
+    # Store new welcome media IDs for next product click
+    context.user_data["welcome_media_msg_ids"] = welcome_media_msg_ids
+    context.user_data["welcome_chat_id"] = chat_id
+
     reply_markup = await build_product_keyboard(context)
     custom_text = await get_setting_with_fallback(context, "welcome_text")
     welcome_text = custom_text if custom_text else WELCOME_TEXT
@@ -357,7 +480,7 @@ async def back_to_products_callback(update: Update, context: ContextTypes.DEFAUL
         await query.edit_message_text(welcome_text, reply_markup=reply_markup, parse_mode="Markdown")
     except Exception:
         await context.bot.send_message(
-            chat_id=query.message.chat_id,
+            chat_id=chat_id,
             text=welcome_text, reply_markup=reply_markup, parse_mode="Markdown",
         )
 
