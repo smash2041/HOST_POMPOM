@@ -56,6 +56,9 @@ BUYNOW_ADD_PLAN_DAYS = 51
 BUYNOW_ADD_PLAN_COLOR = 52
 SET_BUYNOW_CHANNEL_LINK = 53
 
+# ── Mass Add Products state ──
+MASS_ADD_NAMES = 54
+
 
 # ═══════════════════════════════════════════════
 #  ADMIN MENU
@@ -107,6 +110,7 @@ async def _show_admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard = [
             [InlineKeyboardButton("🎁 Edit Product", callback_data="adm_edit")],
             [InlineKeyboardButton("➕ Add Product", callback_data="adm_add")],
+            [InlineKeyboardButton("📦 Mass Add Products", callback_data="adm_mass_add")],
             [InlineKeyboardButton("🗑 Remove Product", callback_data="adm_remove")],
             [InlineKeyboardButton(f"🔘 Toggle Proof Button ({proof_status})", callback_data="adm_toggle_proof")],
             [InlineKeyboardButton(f"🔒 Forward Protection ({fwd_status})", callback_data="adm_toggle_fwd")],
@@ -162,6 +166,7 @@ async def _show_admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard = [
             [InlineKeyboardButton("🎁 Edit Product", callback_data="adm_edit")],
             [InlineKeyboardButton("➕ Add Product", callback_data="adm_add")],
+            [InlineKeyboardButton("📦 Mass Add Products", callback_data="adm_mass_add")],
             [InlineKeyboardButton("🗑 Remove Product", callback_data="adm_remove")],
             [InlineKeyboardButton("🔄 Reset Products to Main", callback_data="adm_reset_products")],
             [InlineKeyboardButton(f"🔘 Toggle Proof Button ({proof_status})", callback_data="adm_toggle_proof")],
@@ -240,6 +245,20 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         context.user_data["add_product"] = {}
         await query.edit_message_text("➕ *Add New Product*\n\n📝 Enter the product name:", parse_mode="Markdown")
         return AP_NAME
+    elif data == "adm_mass_add":
+        await query.edit_message_text(
+            "📦 *Mass Add Products*\n\n"
+            "Send product names — one name per line.\n"
+            "All products will be created with ₹0 price.\n\n"
+            "📝 *Example:*\n"
+            "`Plan A`\n"
+            "`Plan B`\n"
+            "`Plan C`\n\n"
+            "Then use 🎁 Edit Product to set price, media, channel link etc.\n\n"
+            "_Send /cancel to go back_",
+            parse_mode="Markdown",
+        )
+        return MASS_ADD_NAMES
     elif data == "adm_remove":
         return await _show_remove_products(update, context)
     elif data == "adm_reset_products":
@@ -508,6 +527,45 @@ async def _ap_channel(update, context):
         f"🎬 Trial Media: {len(data.get('trial_ids', []))}\n🔗 Channel: {channel_link}\n🆔 ID: #{product_id}",
         parse_mode="Markdown",
     )
+    return await _show_admin_menu(update, context)
+
+
+# ═══════════════════════════════════════════════
+#  MASS ADD PRODUCTS — Multiple names at once
+# ═══════════════════════════════════════════════
+
+async def _mass_add_products(update, context):
+    """Receive multiple product names (one per line) and create them all with ₹0 price."""
+    main_db = _get_products_write_db(context)
+    text = update.message.text.strip()
+    if not text:
+        await update.message.reply_text("❌ Send product names, one per line.")
+        return MASS_ADD_NAMES
+
+    # Split by newlines, strip each, remove empty
+    names = [n.strip() for n in text.split("\n") if n.strip()]
+    if not names:
+        await update.message.reply_text("❌ No valid names found. Send one name per line.")
+        return MASS_ADD_NAMES
+
+    created = []
+    for name in names:
+        try:
+            pid = await main_db.add_product(
+                name=name, price=0,
+                description="", trial_file_ids="[]", channel_link="",
+            )
+            created.append(f"✅ #{pid} — {name}")
+        except Exception as e:
+            created.append(f"❌ {name} — Error: {str(e)[:50]}")
+
+    result_text = (
+        f"📦 *Mass Add Complete!*\n\n"
+        f"Created *{len(created)}* products:\n\n" +
+        "\n".join(created) +
+        "\n\n📝 Use 🎁 *Edit Product* to set price, media, channel link for each."
+    )
+    await update.message.reply_text(result_text, parse_mode="Markdown")
     return await _show_admin_menu(update, context)
 
 
@@ -1849,6 +1907,7 @@ def get_admin_conversation_handler() -> ConversationHandler:
         BUYNOW_ADD_PLAN_DAYS: [MessageHandler(filters.TEXT & ~filters.COMMAND, _buynow_plan_days)],
         BUYNOW_ADD_PLAN_COLOR: [CallbackQueryHandler(_buynow_plan_color, pattern=r"^adm_bn_color_")],
         SET_BUYNOW_CHANNEL_LINK: [MessageHandler(filters.TEXT & ~filters.COMMAND, _set_buynow_channel_link)],
+        MASS_ADD_NAMES: [MessageHandler(filters.TEXT & ~filters.COMMAND, _mass_add_products)],
     }
 
     try:

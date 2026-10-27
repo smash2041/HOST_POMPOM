@@ -49,7 +49,7 @@ async def build_product_keyboard(context) -> InlineKeyboardMarkup:
             "text": f"{product['name']} — {format_price(product['price'])}",
             "callback_data": f"product_{product['id']}",
         }
-        style = product.get("button_style", "")
+        style = product.get("button_style", "") or "success"  # default green
         if color_enabled and style in ("primary", "success", "danger"):
             btn_kwargs["style"] = style
         keyboard.append([InlineKeyboardButton(**btn_kwargs)])
@@ -281,6 +281,14 @@ async def product_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception:
                 pass
 
+    # ── Delete the welcome text message (the one with product buttons) ──
+    try:
+        await query.message.delete()
+    except Exception:
+        pass
+
+    chat_id = query.message.chat_id
+
     trial_ids = product.get("trial_file_ids_list", [])
     trial_sent_msg_ids = []  # Store all trial media msg IDs for back button cleanup
     if trial_ids:
@@ -315,16 +323,16 @@ async def product_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if len(chunk) == 1:
                     item = chunk[0]
                     if isinstance(item, InputMediaPhoto):
-                        msg = await context.bot.send_photo(chat_id=query.message.chat_id, photo=item.media, protect_content=protect, has_spoiler=True)
+                        msg = await context.bot.send_photo(chat_id=chat_id, photo=item.media, protect_content=protect, has_spoiler=True)
                     else:
-                        msg = await context.bot.send_video(chat_id=query.message.chat_id, video=item.media, protect_content=protect, has_spoiler=True)
+                        msg = await context.bot.send_video(chat_id=chat_id, video=item.media, protect_content=protect, has_spoiler=True)
                     if msg:
                         trial_sent_msg_ids.append(msg.message_id)
                         if should_disappear:
                             sent_messages.append(msg)
                 else:
                     sent_msgs = await context.bot.send_media_group(
-                        chat_id=query.message.chat_id, media=chunk,
+                        chat_id=chat_id, media=chunk,
                         protect_content=protect,
                     )
                     if sent_msgs:
@@ -336,14 +344,14 @@ async def product_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if should_disappear and sent_messages:
             disappear_seconds = await get_auto_disappear_seconds(context)
-            async def _auto_delete(bot, chat_id, messages, delay):
+            async def _auto_delete(bot, _chat_id, messages, delay):
                 await asyncio.sleep(delay)
                 for msg in messages:
                     try:
-                        await bot.delete_message(chat_id=chat_id, message_id=msg.message_id)
+                        await bot.delete_message(chat_id=_chat_id, message_id=msg.message_id)
                     except Exception:
                         pass
-            asyncio.create_task(_auto_delete(context.bot, query.message.chat_id, list(sent_messages), disappear_seconds))
+            asyncio.create_task(_auto_delete(context.bot, chat_id, list(sent_messages), disappear_seconds))
 
     # Store trial media msg IDs so back button can clean them up
     context.user_data["product_trial_msg_ids"] = trial_sent_msg_ids
@@ -363,19 +371,13 @@ async def product_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ],
     ]
 
-    try:
-        await query.edit_message_text(
-            text=text,
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode="Markdown",
-        )
-    except Exception:
-        await context.bot.send_message(
-            chat_id=query.message.chat_id,
-            text=text,
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode="Markdown",
-        )
+    # Send product info + buttons as NEW message BELOW the trial media
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=text,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown",
+    )
 
 
 async def back_to_products_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -395,6 +397,12 @@ async def back_to_products_callback(update: Update, context: ContextTypes.DEFAUL
                 await context.bot.delete_message(chat_id=chat_id, message_id=mid)
             except Exception:
                 pass
+
+    # ── Delete the product text message (Buy Now / Back buttons) ──
+    try:
+        await query.message.delete()
+    except Exception:
+        pass
 
     # ── Re-send welcome media ──
     protect = await get_forward_protection(context)
@@ -476,13 +484,11 @@ async def back_to_products_callback(update: Update, context: ContextTypes.DEFAUL
     reply_markup = await build_product_keyboard(context)
     custom_text = await get_setting_with_fallback(context, "welcome_text")
     welcome_text = custom_text if custom_text else WELCOME_TEXT
-    try:
-        await query.edit_message_text(welcome_text, reply_markup=reply_markup, parse_mode="Markdown")
-    except Exception:
-        await context.bot.send_message(
-            chat_id=chat_id,
-            text=welcome_text, reply_markup=reply_markup, parse_mode="Markdown",
-        )
+    # Send as NEW message below re-sent welcome media
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=welcome_text, reply_markup=reply_markup, parse_mode="Markdown",
+    )
 
 
 async def show_proof_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
