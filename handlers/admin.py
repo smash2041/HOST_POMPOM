@@ -1137,6 +1137,8 @@ async def _set_welcome(update, context):
         t = update.message.text.strip().lower()
         if t == "clear":
             await settings_db.set_setting("welcome_media_ids", "[]")
+            await settings_db.set_setting("welcome_video_id", "")
+            await settings_db.set_setting("welcome_photo_id", "")
             await update.message.reply_text("✅ Welcome media cleared!")
             return await _show_admin_menu(update, context)
         elif t == "done":

@@ -84,7 +84,7 @@ async def build_product_keyboard(context) -> InlineKeyboardMarkup:
     proof_enabled = await get_setting_with_fallback(context, "proof_button_enabled")
     if proof_enabled == "1":
         proof_link = await get_setting_with_fallback(context, "proof_link") or ""
-        proof_color = await get_setting_with_fallback(context, "proof_button_color") or ""
+        proof_color = await get_setting_with_fallback(context, "proof_button_color") or "primary"
         proof_btn_kwargs = {"text": "📸 Proof"}
         if proof_link:
             proof_btn_kwargs["url"] = proof_link
@@ -219,8 +219,9 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         logger.warning(f"Failed to send welcome media group chunk: {e}")
         except Exception as e:
             logger.warning(f"Failed to parse welcome_media_ids: {e}")
-    else:
-        # Fallback: single welcome video/photo
+    elif media_ids_json is None or media_ids_json == "":
+        # Fallback: single welcome video/photo (only if welcome_media_ids is unset)
+        # If media_ids_json == "[]", welcome media was explicitly cleared/empty, so skip sending anything!
         media_type = await get_setting_with_fallback(context, "welcome_media_type") or "video"
         if media_type == "video":
             video_id = await get_setting_with_fallback(context, "welcome_video_id")

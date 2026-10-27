@@ -39,6 +39,9 @@ class Database:
     def __init__(self, table_prefix=""):
         self.client = None
         self.table_prefix = table_prefix
+        self._settings_cache = {}
+        self._settings_cache_loaded = 0.0
+        self._buynow_cache = {}
 
     # ──────────────── Connection ────────────────
 
@@ -251,7 +254,7 @@ class Database:
             "demo_button_enabled": "0",
             "demo_link": "",
             "demo_button_color": "",
-            "proof_button_color": "",
+            "proof_button_color": "primary",
             "buynow_enabled": "0",
             "buynow_price_list": "",
             "buynow_plans": "[]",
@@ -410,19 +413,46 @@ class Database:
 
     # ──────────────── SETTINGS (Per-bot, prefixed) ────────────────
 
-    async def get_setting(self, key):
+    async def _ensure_settings_cache(self):
+        import time
+        now = time.time()
+        # If cache was bulk-loaded within last 60 seconds, reuse it
+        if (now - getattr(self, "_settings_cache_loaded", 0.0)) < 60:
+            return
+
         t = self._t
-        result = await self.execute(f"SELECT value FROM {t('settings')} WHERE key = ?", [key])
-        if result.rows:
-            return result.rows[0][0]
-        return None
+        try:
+            result = await self.execute(f"SELECT key, value FROM {t('settings')}")
+            new_cache = {}
+            for row in result.rows:
+                new_cache[row[0]] = row[1]
+            self._settings_cache = new_cache
+            self._settings_cache_loaded = now
+        except Exception as e:
+            logger.warning(f"Failed to load settings cache for prefix='{self.table_prefix}': {e}")
+
+    async def get_setting(self, key):
+        try:
+            await self._ensure_settings_cache()
+            return self._settings_cache.get(key, None)
+        except Exception:
+            t = self._t
+            result = await self.execute(f"SELECT value FROM {t('settings')} WHERE key = ?", [key])
+            if result.rows:
+                return result.rows[0][0]
+            return None
 
     async def set_setting(self, key, value):
+        import time
         t = self._t
         await self.execute(
             f"INSERT OR REPLACE INTO {t('settings')} (key, value) VALUES (?, ?)",
             [key, str(value)],
         )
+        if not hasattr(self, "_settings_cache"):
+            self._settings_cache = {}
+        self._settings_cache[key] = str(value)
+        self._settings_cache_loaded = time.time()
 
     # ──────────────── HOSTING ADMINS ────────────────
 
@@ -527,6 +557,8 @@ class Database:
                 logger.info(f"Dropped table: {table}")
             except Exception as e:
                 logger.warning(f"Failed to drop table {table}: {e}")
+        self._settings_cache = {}
+        self._settings_cache_loaded = 0.0
         return True
 
     # ──────────────── SWIPE UPI MODE ────────────────
@@ -746,21 +778,38 @@ class Database:
                 "VALUES (?, 1, ?)",
                 [bot_id, granted_by],
             )
+        import time
+        if not hasattr(self, "_buynow_cache"):
+            self._buynow_cache = {}
+        self._buynow_cache[bot_id] = (True, time.time() + 60)
 
     async def revoke_buynow_access(self, bot_id):
         """Revoke Buy Now toggle access from a hosted bot."""
         await self.execute(
             "UPDATE buynow_access SET is_granted = 0 WHERE bot_id = ?", [bot_id]
         )
+        import time
+        if not hasattr(self, "_buynow_cache"):
+            self._buynow_cache = {}
+        self._buynow_cache[bot_id] = (False, time.time() + 60)
 
     async def has_buynow_access(self, bot_id):
         """Check if a hosted bot has Buy Now toggle access."""
+        import time
+        now = time.time()
+        if hasattr(self, "_buynow_cache") and bot_id in self._buynow_cache:
+            val, expiry = self._buynow_cache[bot_id]
+            if now < expiry:
+                return val
+
         result = await self.execute(
             "SELECT is_granted FROM buynow_access WHERE bot_id = ?", [bot_id]
         )
-        if result.rows:
-            return result.rows[0][0] == 1
-        return False
+        val = (result.rows[0][0] == 1) if result.rows else False
+        if not hasattr(self, "_buynow_cache"):
+            self._buynow_cache = {}
+        self._buynow_cache[bot_id] = (val, now + 60)
+        return val
 
     async def get_all_buynow_access(self):
         """Get all buynow access records."""
