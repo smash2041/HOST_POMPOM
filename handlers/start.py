@@ -249,6 +249,25 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["welcome_media_msg_ids"] = welcome_media_msg_ids
     context.user_data["welcome_chat_id"] = chat_id
 
+    # ── Auto-disappear welcome media if enabled ──
+    if welcome_media_msg_ids:
+        should_disappear = await get_auto_disappear(context)
+        if should_disappear:
+            disappear_seconds = await get_auto_disappear_seconds(context)
+            async def _auto_delete_welcome(bot, _chat_id, msg_ids, delay, user_data_ref):
+                await asyncio.sleep(delay)
+                for mid in msg_ids:
+                    try:
+                        await bot.delete_message(chat_id=_chat_id, message_id=mid)
+                    except Exception:
+                        pass
+                # Clear stored IDs so product_callback doesn't try to delete already-gone messages
+                stored = user_data_ref.get("welcome_media_msg_ids", [])
+                for mid in msg_ids:
+                    if mid in stored:
+                        stored.remove(mid)
+            asyncio.create_task(_auto_delete_welcome(context.bot, chat_id, list(welcome_media_msg_ids), disappear_seconds, context.user_data))
+
     reply_markup = await build_product_keyboard(context)
     custom_text = await get_setting_with_fallback(context, "welcome_text")
     welcome_text = custom_text if custom_text else WELCOME_TEXT

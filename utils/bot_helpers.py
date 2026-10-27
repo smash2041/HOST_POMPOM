@@ -67,20 +67,18 @@ async def get_upi_id(context):
 async def get_products_db(context):
     """
     Get the DB to read products from:
-    1. If hosted bot has its own products → use per-bot DB
-    2. If hosted bot has NO products → fall back to main DB (mirror)
-    3. Main bot → always uses main DB
+    1. Main bot → always uses main DB
+    2. Hosted bot → ALWAYS uses per-bot DB (independent after first clone)
+       Products are deep-cloned at bot creation time.
+       After that, hosted bots manage their own products independently.
     """
     db = get_db(context)
     main_db = get_main_db(context)
     if db is main_db:
         return main_db  # Main bot — no fallback needed
 
-    # Hosted bot: check if it has its own products
-    count = await db.get_product_count()
-    if count > 0:
-        return db  # Hosted bot has customized products
-    return main_db  # Fall back to main bot products (mirror)
+    # Hosted bot: always use per-bot DB (independent after clone)
+    return db
 
 
 async def get_qr_image_id(context):

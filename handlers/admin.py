@@ -159,15 +159,16 @@ async def _show_admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             htu_enabled = await main_db.get_setting("htu_button_enabled")
         htu_status = "ON ✅" if htu_enabled != "0" else "OFF ❌"
 
-        # Check if hosted bot has own products or using main mirror
+        # Check hosted bot product count (independent after clone)
         product_count = await db.get_product_count()
-        products_source = f"Custom ({product_count})" if product_count > 0 else "Mirrored from Main"
+        products_source = f"{product_count} products" if product_count > 0 else "No products (use Reset to re-clone from Main)"
 
         keyboard = [
             [InlineKeyboardButton("🎁 Edit Product", callback_data="adm_edit")],
             [InlineKeyboardButton("➕ Add Product", callback_data="adm_add")],
             [InlineKeyboardButton("📦 Mass Add Products", callback_data="adm_mass_add")],
             [InlineKeyboardButton("🗑 Remove Product", callback_data="adm_remove")],
+            [InlineKeyboardButton("🗑💣 Mass Remove All Products", callback_data="adm_mass_remove")],
             [InlineKeyboardButton("🔄 Reset Products to Main", callback_data="adm_reset_products")],
             [InlineKeyboardButton(f"🔘 Toggle Proof Button ({proof_status})", callback_data="adm_toggle_proof")],
             [InlineKeyboardButton(f"❓ How to Use Button ({htu_status})", callback_data="adm_toggle_htu")],
@@ -359,6 +360,10 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return await _toggle_setting(update, context, "buynow_enabled", "Buy Now")
     elif data == "adm_buynow_settings":
         return await _show_buynow_settings_menu(update, context)
+    elif data == "adm_mass_remove":
+        return await _mass_remove_confirm(update, context)
+    elif data == "adm_mass_remove_yes":
+        return await _mass_remove_execute(update, context)
     elif data.startswith("adm_btnclr_"):
         return await _show_button_color_picker(update, context)
     elif data == "adm_pending":
@@ -804,6 +809,59 @@ async def _rp_confirm(update, context):
             await main_db.delete_product(product_id)
             await query.answer("✅ Product removed!", show_alert=True)
     context.user_data.pop("remove_product_id", None)
+    return await _show_admin_menu(update, context)
+
+
+# ═══════════════════════════════════════════════
+#  MASS REMOVE ALL PRODUCTS (Hosted bot only)
+# ═══════════════════════════════════════════════
+
+async def _mass_remove_confirm(update, context):
+    """Show confirmation prompt before mass removing all products."""
+    query = update.callback_query
+    if is_main_bot(context):
+        await query.answer("❌ Not available on main bot.", show_alert=True)
+        return await _show_admin_menu(update, context)
+
+    db = get_db(context)
+    count = await db.get_product_count()
+    if count == 0:
+        await query.answer("❌ No products to remove.", show_alert=True)
+        return await _show_admin_menu(update, context)
+
+    keyboard = [
+        [
+            InlineKeyboardButton("✅ Yes, Remove ALL", callback_data="adm_mass_remove_yes"),
+            InlineKeyboardButton("❌ Cancel", callback_data="adm_back"),
+        ]
+    ]
+    await query.edit_message_text(
+        f"⚠️ *Mass Remove All Products*\n\n"
+        f"This will permanently delete ALL *{count}* products from this bot.\n\n"
+        f"⚠️ *This action cannot be undone!*\n"
+        f"Use 🔄 Reset Products to Main to re-clone from main bot.\n\n"
+        f"Are you sure?",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown",
+    )
+    return ADMIN_MENU
+
+
+async def _mass_remove_execute(update, context):
+    """Execute mass removal of all products for hosted bot."""
+    query = update.callback_query
+    await query.answer()
+
+    if is_main_bot(context):
+        await query.answer("❌ Not available on main bot.", show_alert=True)
+        return await _show_admin_menu(update, context)
+
+    db = get_db(context)
+    t = db._t
+    # Delete all products from hosted bot's table
+    await db.execute(f"DELETE FROM {t('products')}")
+
+    await query.answer("✅ All products removed!", show_alert=True)
     return await _show_admin_menu(update, context)
 
 

@@ -200,7 +200,11 @@ class BotManager:
             logger.error(f"❌ Deep clone failed for {db_instance.table_prefix}: {e}")
 
     async def fix_existing_bots(self):
-        """For existing hosted bots that have 0 products, deep clone from main."""
+        """
+        For existing hosted bots that have never been cloned, deep clone from main.
+        Uses 'products_cloned' setting to track if clone has happened.
+        Bots that intentionally deleted all products will NOT be re-cloned.
+        """
         try:
             result = await self.main_db.execute(
                 "SELECT * FROM hosted_bots WHERE status = 'active'"
@@ -213,11 +217,15 @@ class BotManager:
                 bot_record = _row_to_hosted_bot(row)
                 db_instance = Database(table_prefix=bot_record["table_prefix"])
                 await db_instance.init()
-                count = await db_instance.get_product_count()
-                if count == 0:
-                    await self._deep_clone_data(db_instance)
-                    fixed += 1
-                    logger.info(f"🔧 Fixed bot {bot_record['id']}: deep cloned data")
+                # Only clone if never cloned before (products_cloned flag not set)
+                cloned_flag = await db_instance.get_setting("products_cloned")
+                if cloned_flag != "1":
+                    count = await db_instance.get_product_count()
+                    if count == 0:
+                        await self._deep_clone_data(db_instance)
+                        await db_instance.set_setting("products_cloned", "1")
+                        fixed += 1
+                        logger.info(f"🔧 Fixed bot {bot_record['id']}: deep cloned data")
                 await db_instance.close()
 
             if fixed:
@@ -286,6 +294,7 @@ class BotManager:
         new_db = Database(table_prefix=table_prefix)
         await new_db.init()
         await self._deep_clone_data(new_db)
+        await new_db.set_setting("products_cloned", "1")
         await new_db.close()
 
         # 7. Start the bot (with pre-cache since it's new)
