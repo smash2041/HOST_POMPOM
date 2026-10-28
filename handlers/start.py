@@ -74,10 +74,11 @@ async def build_product_keyboard(context) -> InlineKeyboardMarkup:
         btn_kwargs = {"text": "🎬 Demo"}
         if demo_link:
             btn_kwargs["url"] = demo_link
+            # Note: style is NOT supported on URL buttons in Telegram API
         else:
             btn_kwargs["callback_data"] = "show_demo"
-        if color_enabled and demo_color in ("primary", "success", "danger"):
-            btn_kwargs["style"] = demo_color
+            if color_enabled and demo_color in ("primary", "success", "danger"):
+                btn_kwargs["style"] = demo_color
         keyboard.append([InlineKeyboardButton(**btn_kwargs)])
 
     # Proof button — uses fallback (per-bot → main)
@@ -88,10 +89,11 @@ async def build_product_keyboard(context) -> InlineKeyboardMarkup:
         proof_btn_kwargs = {"text": "📸 Proof"}
         if proof_link:
             proof_btn_kwargs["url"] = proof_link
+            # Note: style is NOT supported on URL buttons in Telegram API
         else:
             proof_btn_kwargs["callback_data"] = "show_proof"
-        if color_enabled and proof_color in ("primary", "success", "danger"):
-            proof_btn_kwargs["style"] = proof_color
+            if color_enabled and proof_color in ("primary", "success", "danger"):
+                proof_btn_kwargs["style"] = proof_color
         keyboard.append([InlineKeyboardButton(**proof_btn_kwargs)])
 
     # Bottom row — horizontal: How to Use + Report an Issue
