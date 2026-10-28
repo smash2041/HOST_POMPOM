@@ -895,6 +895,9 @@ async def _toggle_setting(update, context, key, label, main_only=False):
 async def _set_proof_link(update, context):
     settings_db = _get_settings_db(context)
     link = update.message.text.strip()
+    # Auto-prepend https:// if missing — Telegram requires valid URL scheme
+    if link and not link.startswith(("http://", "https://", "tg://")):
+        link = "https://" + link
     await settings_db.set_setting("proof_link", link)
     await update.message.reply_text(f"✅ Proof link updated to:\n{link}")
     return await _show_admin_menu(update, context)
@@ -1590,6 +1593,9 @@ async def _set_demo_link(update, context):
     """Receive and save demo link from admin."""
     settings_db = _get_settings_db(context)
     link = update.message.text.strip()
+    # Auto-prepend https:// if missing — Telegram requires valid URL scheme
+    if link and not link.startswith(("http://", "https://", "tg://")):
+        link = "https://" + link
     await settings_db.set_setting("demo_link", link)
     await update.message.reply_text(f"✅ Demo link updated to:\n{link}")
     return await _show_admin_menu(update, context)
