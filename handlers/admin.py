@@ -294,10 +294,17 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return await _show_welcome_text_menu(update, context)
     elif data == "adm_proof_link":
         current = await _get_current_setting(context, "proof_link")
-        await query.edit_message_text(
-            f"📄 *Set Proof Link*\n\nCurrent: {current or 'Not set'}\n\n🔗 Send the new proof link/URL:\n\n_Send /cancel to go back_",
-            parse_mode="Markdown",
-        )
+        try:
+            current_display = f"`{current}`" if current else "Not set"
+            await query.edit_message_text(
+                f"📄 *Set Proof Link*\n\nCurrent: {current_display}\n\n🔗 Send the new proof link/URL:\n\n_Send /cancel to go back_",
+                parse_mode="Markdown",
+            )
+        except Exception:
+            # Fallback without Markdown if link has special chars that break parsing
+            await query.edit_message_text(
+                f"📄 Set Proof Link\n\nCurrent: {current or 'Not set'}\n\n🔗 Send the new proof link/URL:\n\nSend /cancel to go back",
+            )
         return SET_PROOF_LINK_INPUT
     elif data == "adm_proof_photo":
         await query.edit_message_text(
@@ -351,10 +358,17 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return await _toggle_setting(update, context, "demo_button_enabled", "Demo Button")
     elif data == "adm_set_demo_link":
         current = await _get_current_setting(context, "demo_link")
-        await query.edit_message_text(
-            f"🔗 *Set Demo Link*\n\nCurrent: {current or 'Not set'}\n\n🔗 Send the new demo link/URL:\n\n_Send /cancel to go back_",
-            parse_mode="Markdown",
-        )
+        try:
+            current_display = f"`{current}`" if current else "Not set"
+            await query.edit_message_text(
+                f"🔗 *Set Demo Link*\n\nCurrent: {current_display}\n\n🔗 Send the new demo link/URL:\n\n_Send /cancel to go back_",
+                parse_mode="Markdown",
+            )
+        except Exception:
+            # Fallback without Markdown if link has special chars that break parsing
+            await query.edit_message_text(
+                f"🔗 Set Demo Link\n\nCurrent: {current or 'Not set'}\n\n🔗 Send the new demo link/URL:\n\nSend /cancel to go back",
+            )
         return SET_DEMO_LINK_INPUT
     elif data == "adm_toggle_buynow":
         return await _toggle_setting(update, context, "buynow_enabled", "Buy Now")
