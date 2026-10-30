@@ -58,6 +58,7 @@ SET_BUYNOW_CHANNEL_LINK = 53
 
 # ── Mass Add Products state ──
 MASS_ADD_NAMES = 54
+SET_PAYFINO_CONFIG = 55
 
 
 # ═══════════════════════════════════════════════
@@ -182,6 +183,7 @@ async def _show_admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("📢 Broadcast", callback_data="adm_broadcast")],
             [InlineKeyboardButton("👥 View Users", callback_data="adm_users")],
             [InlineKeyboardButton("📊 Stats", callback_data="adm_stats")],
+            [InlineKeyboardButton("💳 Payfino Gateway", callback_data="adm_payfino")],
         ]
 
         # Demo toggle + link for hosted bot
@@ -374,6 +376,14 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return await _toggle_setting(update, context, "buynow_enabled", "Buy Now")
     elif data == "adm_buynow_settings":
         return await _show_buynow_settings_menu(update, context)
+    elif data == "adm_payfino":
+        return await _show_payfino_menu(update, context)
+    elif data == "adm_pf_configure":
+        return await _start_payfino_config(update, context)
+    elif data == "adm_pf_disable":
+        return await _disable_payfino(update, context)
+    elif data == "adm_pf_back":
+        return await _show_admin_menu(update, context)
     elif data == "adm_mass_remove":
         return await _mass_remove_confirm(update, context)
     elif data == "adm_mass_remove_yes":
@@ -407,6 +417,102 @@ def _get_settings_db(context):
         return get_main_db(context)
     else:
         return get_db(context)
+
+
+async def _show_payfino_menu(update, context):
+    """Hosted-bot-only gateway configuration; never display stored secrets."""
+    query = update.callback_query
+    db = get_db(context)
+    keys = (
+        "payfino_authorization_key", "payfino_module_secret",
+        "payfino_merchant_id", "payfino_password", "payfino_callback_url",
+    )
+    values = [await db.get_setting(key) for key in keys]
+    enabled = all(values)
+    text = (
+        "💳 *Payfino Gateway*\n\n"
+        f"Status: {'🟢 Configured' if enabled else '🔴 Not configured'}\n\n"
+        "Settings are saved only in this hosted bot's database. Secret values are never shown here.\n\n"
+        "Configure the two Developer Zone keys, merchantId, password, and your public HTTPS callback URL ending in `/payfino/callback`.\n\n"
+        "⚠️ Payfino documentation also marks payer mobile and email as required. This bot will not collect those details, so Payfino may reject order creation."
+    )
+    keyboard = [
+        [InlineKeyboardButton("🔐 Configure / Replace", callback_data="adm_pf_configure")],
+    ]
+    if enabled:
+        keyboard.append([InlineKeyboardButton("⛔ Disable Gateway", callback_data="adm_pf_disable")])
+    keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="adm_pf_back")])
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+    return ADMIN_MENU
+
+
+async def _start_payfino_config(update, context):
+    query = update.callback_query
+    if is_main_bot(context):
+        await query.answer("Payfino is available only in a hosted bot.", show_alert=True)
+        return ADMIN_MENU
+    context.user_data["payfino_config_values"] = []
+    await query.edit_message_text(
+        "🔐 Payfino setup (1/5)\n\nSend X-Authorization-Key from Payfino Developer Zone.\n\nYour message will be deleted if Telegram allows it. Send /cancel to stop.",
+    )
+    return SET_PAYFINO_CONFIG
+
+
+async def _payfino_config_input(update, context):
+    value = (update.message.text or "").strip()
+    try:
+        await update.message.delete()
+    except Exception:
+        pass
+    if not value:
+        await update.effective_chat.send_message("Value cannot be empty. Please send it again.")
+        return SET_PAYFINO_CONFIG
+
+    values = context.user_data.setdefault("payfino_config_values", [])
+    values.append(value)
+    prompts = [
+        "Send X-Module-Secret from Payfino Developer Zone.",
+        "Send your Payfino merchantId.",
+        "Send your Payfino merchant password.",
+        "Send your public HTTPS callback URL, ending in /payfino/callback.",
+    ]
+    if len(values) < 5:
+        await update.effective_chat.send_message(
+            f"Payfino setup ({len(values) + 1}/5)\n\n{prompts[len(values) - 1]}\n\nSend /cancel to stop."
+        )
+        return SET_PAYFINO_CONFIG
+
+    callback_url = values[4]
+    if not callback_url.startswith("https://") or not callback_url.endswith("/payfino/callback"):
+        values.pop()
+        await update.effective_chat.send_message(
+            "Callback URL must be HTTPS and end with /payfino/callback. Send the URL again."
+        )
+        return SET_PAYFINO_CONFIG
+
+    db = _get_settings_db(context)
+    keys = (
+        "payfino_authorization_key", "payfino_module_secret",
+        "payfino_merchant_id", "payfino_password", "payfino_callback_url",
+    )
+    for key, secret in zip(keys, values):
+        await db.set_setting(key, secret)
+    context.user_data.pop("payfino_config_values", None)
+    await update.effective_chat.send_message(
+        "✅ Payfino settings saved for this hosted bot. Stored secrets are hidden from the menu.\n\n"
+        "Note: Payfino docs require payer mobile/email; checkout will not collect those, so confirm with Payfino that these fields may be omitted."
+    )
+    return await _show_admin_menu(update, context)
+
+
+async def _disable_payfino(update, context):
+    db = _get_settings_db(context)
+    for key in (
+        "payfino_authorization_key", "payfino_module_secret",
+        "payfino_merchant_id", "payfino_password", "payfino_callback_url",
+    ):
+        await db.set_setting(key, "")
+    return await _show_payfino_menu(update, context)
 
 
 def _get_products_write_db(context):
@@ -1912,7 +2018,7 @@ async def _buynow_plan_color(update, context):
 async def _cancel_admin(update, context):
     for key in ["add_product", "edit_product_id", "edit_field", "edit_trial_ids",
                  "remove_product_id", "broadcast_message", "welcome_ids", "manage_admin_action", "htu_video", "new_admin_id",
-                 "btnclr_setting_key", "buynow_new_plan"]:
+                 "btnclr_setting_key", "buynow_new_plan", "payfino_config_values"]:
         context.user_data.pop(key, None)
     user_id = update.effective_user.id
     if is_main_bot(context):
@@ -1988,6 +2094,7 @@ def get_admin_conversation_handler() -> ConversationHandler:
         BUYNOW_ADD_PLAN_COLOR: [CallbackQueryHandler(_buynow_plan_color, pattern=r"^adm_bn_color_")],
         SET_BUYNOW_CHANNEL_LINK: [MessageHandler(filters.TEXT & ~filters.COMMAND, _set_buynow_channel_link)],
         MASS_ADD_NAMES: [MessageHandler(filters.TEXT & ~filters.COMMAND, _mass_add_products)],
+        SET_PAYFINO_CONFIG: [MessageHandler(filters.TEXT & ~filters.COMMAND, _payfino_config_input)],
     }
 
     try:
