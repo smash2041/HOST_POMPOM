@@ -59,6 +59,7 @@ SET_BUYNOW_CHANNEL_LINK = 53
 # ── Mass Add Products state ──
 MASS_ADD_NAMES = 54
 SET_PAYFINO_CONFIG = 56
+SET_PAYFINO_CONTACT = 57
 
 
 # ═══════════════════════════════════════════════
@@ -380,6 +381,8 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return await _show_payfino_menu(update, context)
     elif data == "adm_pf_configure":
         return await _start_payfino_config(update, context)
+    elif data == "adm_pf_contact":
+        return await _start_payfino_contact(update, context)
     elif data == "adm_pf_disable":
         return await _disable_payfino(update, context)
     elif data == "adm_pf_back":
@@ -425,21 +428,25 @@ async def _show_payfino_menu(update, context):
     db = get_db(context)
     keys = (
         "payfino_authorization_key", "payfino_module_secret",
-        "payfino_merchant_id", "payfino_password", "payfino_callback_url",
+        "payfino_merchant_id", "payfino_password", "payfino_payee_mobile",
+        "payfino_payee_email", "payfino_callback_url",
     )
     values = [await db.get_setting(key) for key in keys]
-    enabled = all(values)
+    credentials_ready = all(values[:4]) and bool(values[6])
+    contact_ready = all(values[4:6])
     text = (
         "💳 *Payfino Gateway*\n\n"
-        f"Status: {'🟢 Configured' if enabled else '🔴 Not configured'}\n\n"
+        f"Gateway credentials: {'🟢 Configured' if credentials_ready else '🔴 Not configured'}\n"
+        f"Fixed contact: {'🟢 Set' if contact_ready else '🔴 Not set'}\n\n"
         "Settings are saved only in this hosted bot's database. Secret values are never shown here.\n\n"
-        "Configure the two Developer Zone keys, merchantId, password, and your public HTTPS callback URL ending in `/payfino/callback`.\n\n"
-        "⚠️ Payfino documentation also marks payer mobile and email as required. This bot will not collect those details, so Payfino may reject order creation."
+        "Configure the two Developer Zone keys, merchantId, password, fixed PayIn mobile/email, and public HTTPS callback URL. The mobile/email below are sent with every order.\n\n"
+        "The bot does not collect contact details from buyers."
     )
     keyboard = [
         [InlineKeyboardButton("🔐 Configure / Replace", callback_data="adm_pf_configure")],
+        [InlineKeyboardButton("📇 Set / Update Fixed Contact", callback_data="adm_pf_contact")],
     ]
-    if enabled:
+    if credentials_ready or contact_ready:
         keyboard.append([InlineKeyboardButton("⛔ Disable Gateway", callback_data="adm_pf_disable")])
     keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="adm_pf_back")])
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
@@ -500,7 +507,45 @@ async def _payfino_config_input(update, context):
     context.user_data.pop("payfino_config_values", None)
     await update.effective_chat.send_message(
         "✅ Payfino settings saved for this hosted bot. Stored secrets are hidden from the menu.\n\n"
-        "Note: Payfino docs require payer mobile/email; checkout will not collect those, so confirm with Payfino that these fields may be omitted."
+        "Now set the fixed PayIn mobile and email from the Payfino menu."
+    )
+    return await _show_admin_menu(update, context)
+
+
+async def _start_payfino_contact(update, context):
+    context.user_data["payfino_contact_step"] = "mobile"
+    await update.callback_query.edit_message_text(
+        "📇 Send the fixed 10-digit mobile number to include on every PayIn order.\n\n"
+        "The same contact will be sent for every customer order. Your message will be deleted if Telegram allows it. Send /cancel to stop."
+    )
+    return SET_PAYFINO_CONTACT
+
+
+async def _payfino_contact_input(update, context):
+    value = (update.message.text or "").strip()
+    try:
+        await update.message.delete()
+    except Exception:
+        pass
+
+    if context.user_data.get("payfino_contact_step") == "mobile":
+        if not value.isdigit() or len(value) != 10:
+            await update.effective_chat.send_message("Send a valid 10-digit mobile number.")
+            return SET_PAYFINO_CONTACT
+        context.user_data["payfino_contact_mobile"] = value
+        context.user_data["payfino_contact_step"] = "email"
+        await update.effective_chat.send_message("Now send the fixed email address for every PayIn order.")
+        return SET_PAYFINO_CONTACT
+
+    if "@" not in value or "." not in value.rsplit("@", 1)[-1]:
+        await update.effective_chat.send_message("Send a valid email address.")
+        return SET_PAYFINO_CONTACT
+    db = _get_settings_db(context)
+    await db.set_setting("payfino_payee_mobile", context.user_data.pop("payfino_contact_mobile"))
+    await db.set_setting("payfino_payee_email", value)
+    context.user_data.pop("payfino_contact_step", None)
+    await update.effective_chat.send_message(
+        "✅ Fixed PayIn contact saved. These details will be included in every order."
     )
     return await _show_admin_menu(update, context)
 
@@ -509,7 +554,8 @@ async def _disable_payfino(update, context):
     db = _get_settings_db(context)
     for key in (
         "payfino_authorization_key", "payfino_module_secret",
-        "payfino_merchant_id", "payfino_password", "payfino_callback_url",
+        "payfino_merchant_id", "payfino_password", "payfino_payee_mobile",
+        "payfino_payee_email", "payfino_callback_url",
     ):
         await db.set_setting(key, "")
     return await _show_payfino_menu(update, context)
@@ -2018,7 +2064,8 @@ async def _buynow_plan_color(update, context):
 async def _cancel_admin(update, context):
     for key in ["add_product", "edit_product_id", "edit_field", "edit_trial_ids",
                  "remove_product_id", "broadcast_message", "welcome_ids", "manage_admin_action", "htu_video", "new_admin_id",
-                 "btnclr_setting_key", "buynow_new_plan", "payfino_config_values"]:
+                 "btnclr_setting_key", "buynow_new_plan", "payfino_config_values",
+                 "payfino_contact_step", "payfino_contact_mobile"]:
         context.user_data.pop(key, None)
     user_id = update.effective_user.id
     if is_main_bot(context):
@@ -2095,6 +2142,7 @@ def get_admin_conversation_handler() -> ConversationHandler:
         SET_BUYNOW_CHANNEL_LINK: [MessageHandler(filters.TEXT & ~filters.COMMAND, _set_buynow_channel_link)],
         MASS_ADD_NAMES: [MessageHandler(filters.TEXT & ~filters.COMMAND, _mass_add_products)],
         SET_PAYFINO_CONFIG: [MessageHandler(filters.TEXT & ~filters.COMMAND, _payfino_config_input)],
+        SET_PAYFINO_CONTACT: [MessageHandler(filters.TEXT & ~filters.COMMAND, _payfino_contact_input)],
     }
 
     try:

@@ -30,6 +30,14 @@ async def _begin_payfino_checkout(update, context, product_id, product_name, amo
     if not client:
         return False
 
+    payee_mobile = (await db.get_setting("payfino_payee_mobile") or "").strip()
+    payee_email = (await db.get_setting("payfino_payee_email") or "").strip()
+    if not payee_mobile or not payee_email:
+        await update.callback_query.message.reply_text(
+            "⚠️ Payfino setup is incomplete. Configure the fixed PayIn contact in /admin."
+        )
+        return True
+
     callback_url = (await db.get_setting("payfino_callback_url") or "").strip()
     if not callback_url.startswith("https://"):
         await update.callback_query.message.reply_text(
@@ -57,6 +65,8 @@ async def _begin_payfino_checkout(update, context, product_id, product_name, amo
     payload = {
         "amount": float(amount), "orderid": reference_id,
         "payee_fname": names[0], "payee_lname": names[1] if len(names) > 1 else "",
+        "payee_mobile": payee_mobile,
+        "payee_email": payee_email,
         "callbackurl": callback_url,
     }
     try:
@@ -89,7 +99,7 @@ async def _begin_payfino_checkout(update, context, product_id, product_name, amo
         mapping["status"] = "failed"
         await main_db.set_setting(map_key, json.dumps(mapping))
         await update.callback_query.message.reply_text(
-            "⚠️ Payfino could not create this payment. Its API may require buyer mobile and email; this bot does not collect them. Please try the normal UPI flow or contact the owner."
+            "⚠️ Payfino could not create this payment. Please try the normal UPI flow or contact the owner."
         )
     return True
 
