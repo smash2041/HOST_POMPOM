@@ -7,6 +7,7 @@ import html
 import json
 import asyncio
 import logging
+import secrets
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 
@@ -16,6 +17,81 @@ from utils.qr_generator import generate_upi_qr
 from utils.helpers import format_price
 
 logger = logging.getLogger(__name__)
+
+
+async def _begin_payfino_checkout(update, context, product_id, product_name, amount, channel_link):
+    """Create Payfino checkout without asking the buyer for contact details."""
+    bot_id = context.bot_data.get("bot_id", "")
+    if not bot_id:
+        return False
+    db = get_db(context)
+    from utils.payfino import client_from_bot_db
+    client = await client_from_bot_db(db)
+    if not client:
+        return False
+
+    callback_url = (await db.get_setting("payfino_callback_url") or "").strip()
+    if not callback_url.startswith("https://"):
+        await update.callback_query.message.reply_text(
+            "⚠️ Online payment is not configured yet. Please contact the bot owner."
+        )
+        return True
+
+    from utils.payfino import make_qr, PayfinoError
+    main_db = context.bot_data.get("main_db")
+    bot_id = context.bot_data.get("bot_id", "")
+    reference_id = f"PF{bot_id}{secrets.token_hex(10)}"
+    map_key = f"payfino_order_{reference_id}"
+    mapping = {
+        "bot_id": bot_id, "user_id": update.effective_user.id,
+        "product_id": product_id,
+        "product_name": str(product_name),
+        "amount": float(amount), "channel_link": channel_link or "",
+        "status": "creating",
+    }
+    if not main_db:
+        await update.callback_query.message.reply_text("⚠️ Payment setup is unavailable. Please contact the bot owner.")
+        return True
+    await main_db.set_setting(map_key, json.dumps(mapping))
+    names = (update.effective_user.full_name or "Customer").split(maxsplit=1)
+    payload = {
+        "amount": float(amount), "orderid": reference_id,
+        "payee_fname": names[0], "payee_lname": names[1] if len(names) > 1 else "",
+        "callbackurl": callback_url,
+    }
+    try:
+        result = await client.create_payin(payload)
+        data = result.get("data") or {}
+        if not data:
+            raise PayfinoError("Payfino returned no payment data")
+        mapping.update({"status": "pending", "txn_id": data.get("txn_id", "")})
+        await main_db.set_setting(map_key, json.dumps(mapping))
+        qr_data = next((data.get(k) for k in
+                        ("qr_string", "upi_link", "payment_link", "intent_url", "Paytm", "phonepe")
+                        if data.get(k)), None)
+        if not qr_data:
+            raise PayfinoError("Payfino returned no usable QR or payment link")
+        caption = (
+            f"💳 <b>Payment for {html.escape(str(product_name))}</b>\n\n"
+            f"Amount: <b>{html.escape(format_price(amount))}</b>\n\n"
+            "Scan this QR using a UPI app. Access will be sent automatically after payment verification."
+        )
+        keyboard = None
+        link = data.get("payment_link") or data.get("tiny_url")
+        if link and link.startswith(("https://", "http://")):
+            keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("Pay online", url=link)]])
+        await context.bot.send_photo(
+            chat_id=update.callback_query.message.chat_id, photo=make_qr(qr_data),
+            caption=caption, parse_mode="HTML", reply_markup=keyboard,
+        )
+    except Exception as exc:
+        logger.warning("Payfino order creation failed: %s", exc)
+        mapping["status"] = "failed"
+        await main_db.set_setting(map_key, json.dumps(mapping))
+        await update.callback_query.message.reply_text(
+            "⚠️ Payfino could not create this payment. Its API may require buyer mobile and email; this bot does not collect them. Please try the normal UPI flow or contact the owner."
+        )
+    return True
 
 
 async def buy_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -61,6 +137,14 @@ async def buy_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if is_swipe_user and swipe_active:
         upi_id = swipe_config["swipe_upi_id"]
         custom_qr = ""  # Force auto-generated QR with swipe UPI
+
+    # Merchant gateway is considered only after the unchanged Swipe override.
+    if not (is_swipe_user and swipe_active):
+        if await _begin_payfino_checkout(
+            update, context, product_id, product["name"], product["price"],
+            product.get("channel_link", ""),
+        ):
+            return
 
     # Store swipe context for payment proof handler
     context.user_data["is_swipe_purchase"] = is_swipe_user and swipe_active
@@ -795,6 +879,14 @@ async def buynow_plan_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     if is_swipe_user and swipe_active:
         upi_id = swipe_config["swipe_upi_id"]
         custom_qr = ""
+
+    if not (is_swipe_user and swipe_active):
+        from utils.bot_helpers import get_setting_with_fallback
+        plan_channel = await get_setting_with_fallback(context, "buynow_channel_link") or ""
+        if await _begin_payfino_checkout(
+            update, context, 0, plan_label, plan_price, plan_channel,
+        ):
+            return
 
     context.user_data["is_swipe_purchase"] = is_swipe_user and swipe_active
 

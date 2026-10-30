@@ -344,7 +344,7 @@ async def main():
     logger.info("✅ Expiry checker started")
 
     # ── 5. Start aiohttp Web Server ──
-    web_app = create_web_app()
+    web_app = create_web_app(app)
     runner = web.AppRunner(web_app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", PORT)
