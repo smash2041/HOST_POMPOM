@@ -58,7 +58,7 @@ SET_BUYNOW_CHANNEL_LINK = 53
 
 # ── Mass Add Products state ──
 MASS_ADD_NAMES = 54
-SET_PAYFINO_CONFIG = 55
+SET_PAYFINO_CONFIG = 56
 
 
 # ═══════════════════════════════════════════════
